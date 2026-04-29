@@ -1,0 +1,21 @@
+{
+  "name": "tethr-script-builder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tethr Script Builder — React (Vite) frontend + Express proxy for the Anthropic Claude API.",
+  "scripts": {
+    "install:all": "npm install && npm --prefix frontend install && npm --prefix backend install",
+    "dev": "concurrently \"cd backend && node server.js\" \"cd frontend && vite\"",
+    "dev:frontend": "cd frontend && vite",
+    "dev:backend": "cd backend && node server.js",
+    "build": "cd frontend && vite build",
+    "deploy:staging": "vercel --target preview",
+    "deploy:prod": "vercel --prod"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

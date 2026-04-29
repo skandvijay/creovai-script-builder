@@ -1,0 +1,26 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Build output
+frontend/dist
+dist
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env files (everything except the templates and the per-mode Vite files)
+.env
+.env.local
+.env.*.local
+backend/.env
+backend/.env.local
+
+# IDE / OS
+.DS_Store
+.idea
+.vscode
+
+# Vercel
+.vercel
