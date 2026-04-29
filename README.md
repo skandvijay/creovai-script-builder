@@ -1,174 +1,142 @@
 # Tethr Script Builder
 
 A React (Vite) UI for building Tethr speech-analytics detection scripts, paired
-with a tiny Express proxy that keeps the Anthropic Claude API key off the
-client. Stateless — no database, no auth, no sessions.
+with an Anthropic-Claude proxy that keeps the API key off the client.
+Stateless — no database, no auth, no sessions.
 
 ```
 tethr-script-builder/
-├── frontend/      # Vite + React app (Apple-style inline-styled UI)
-├── backend/       # Express proxy → Anthropic /v1/messages
-├── vercel.json    # Monorepo build + routing for Vercel
-└── package.json   # Root scripts (dev, build, deploy)
+├── frontend/
+│   ├── api/              # Vercel serverless functions (production proxy)
+│   │   ├── messages.js   # POST /api/messages → Anthropic
+│   │   └── health.js     # GET  /api/health
+│   ├── src/              # Vite + React app (Apple-style inline-styled UI)
+│   ├── vite.config.js    # Proxies /api/* → backend/ during local dev
+│   └── package.json
+├── backend/              # Local-dev Express proxy (NOT deployed to Vercel)
+│   ├── server.js
+│   └── package.json
+└── package.json          # Root dev/build/deploy scripts
 ```
 
 ## Architecture
 
+The frontend always calls `fetch("/api/messages", ...)`. Where that request
+lands depends on where the app is running:
+
 ```
-Browser ──> /_/backend/api/messages ──> Express proxy ──> https://api.anthropic.com/v1/messages
-                                        (injects ANTHROPIC_API_KEY)
+Local dev:    Browser → Vite (:5173) → proxy /api → Express (:3001) → Anthropic
+Production:   Browser → Vercel edge → frontend/api/messages.js (serverless) → Anthropic
 ```
 
-- The frontend never sees the API key.
-- All Anthropic prompt constants (`DEFAULT_BUILD_SYS`, `DEFAULT_COMPARE_SYS`,
+- `ANTHROPIC_API_KEY` lives server-side only — never exposed to the browser.
+- The prompt constants (`DEFAULT_BUILD_SYS`, `DEFAULT_COMPARE_SYS`,
   `DEFAULT_CUSTOM_SYS`) live in `frontend/src/App.jsx`. They are not sensitive.
-- The backend exposes exactly two routes — `GET /health` and
-  `POST /api/messages` — and they are mounted at both `/` and `/_/backend/`
-  so requests succeed whether or not Vercel's `routePrefix` is stripped
-  before the request reaches the service.
+- On Vercel, the Express app under `backend/` is **not** deployed. Vercel
+  auto-detects `frontend/api/*.js` as serverless functions and auto-routes
+  `/api/*` to them. No `vercel.json` required.
 
 ## Local development
 
 Requirements: Node **18+** and npm.
 
 ```bash
-git clone <this-repo>
-cd tethr-script-builder
+git clone https://github.com/skandvijay/creovai-script-builder.git
+cd creovai-script-builder
 
-# Install dependencies for root, frontend, and backend in one shot
 npm run install:all
 
-# Configure the backend
 cp backend/.env.example backend/.env
-# edit backend/.env and paste your Anthropic key
+# edit backend/.env → paste your Anthropic key
 
-# Run frontend (5173) and backend (3001) together
 npm run dev
 ```
 
 Then open http://localhost:5173.
 
-You can also run them individually:
+You can also run the processes individually:
 
 ```bash
-npm run dev:backend     # Express on :3001
+npm run dev:backend     # Express on :3001 (local dev only)
 npm run dev:frontend    # Vite on  :5173
 ```
 
-Vite's dev server proxies `/_/backend/*` to `VITE_API_BASE_URL`
-(default `http://localhost:3001`), rewriting the path to strip the
-`/_/backend` prefix — so the frontend always calls
-`fetch("/_/backend/api/messages", ...)` and the Express app receives
-`POST /api/messages`, identical to production.
-
 ## Environment variables
 
-### Backend (`backend/.env`)
+### Local dev — `backend/.env`
 
-| Variable            | Required | Notes                                              |
-| ------------------- | -------- | -------------------------------------------------- |
-| `ANTHROPIC_API_KEY` | yes      | Sent upstream as `x-api-key`                       |
-| `NODE_ENV`          | no       | `development` / `staging` / `production`           |
-| `PORT`              | no       | Local port, defaults to `3001` (ignored on Vercel) |
-| `CORS_ORIGIN`       | no       | Lock CORS to a specific origin, defaults to `*`    |
+| Variable            | Required | Notes                                            |
+| ------------------- | -------- | ------------------------------------------------ |
+| `ANTHROPIC_API_KEY` | yes (to call Claude) | Sent upstream as `x-api-key`         |
+| `NODE_ENV`          | no       | `development` / `staging` / `production`         |
+| `PORT`              | no       | Local port, defaults to `3001`                   |
+| `CORS_ORIGIN`       | no       | Lock CORS to a specific origin, defaults to `*`  |
 
-### Frontend (`frontend/.env.<mode>`)
+Without the key, local calls return a clean
+`500 { "error": "ANTHROPIC_API_KEY is not set on the server." }` — the UI
+still loads; only Claude calls fail.
 
-| Variable             | Used in        | Value                                                  |
-| -------------------- | -------------- | ------------------------------------------------------ |
-| `VITE_API_BASE_URL`  | `vite dev` proxy target | `http://localhost:3001` (development)         |
-|                      |                | `https://tethr-script-builder-staging.vercel.app` (staging) |
-|                      |                | `https://tethr-script-builder.vercel.app` (production) |
+### Production — Vercel dashboard
 
-In production the browser calls the same origin (`/api/messages`) and Vercel's
-rewrite in `vercel.json` sends it to the Express function — the frontend env
-var is only used by the local Vite dev proxy and by `vite build --mode <env>`
-if you need to bake an absolute URL into the build.
+Set this on the Vercel project → Settings → Environment Variables:
 
-## Deployment — three environments
+| Variable            | Environments               |
+| ------------------- | -------------------------- |
+| `ANTHROPIC_API_KEY` | Production, Preview        |
 
-### 1. Development (local only — never deployed)
+Same fail-safe behaviour: if the variable is missing or empty, the serverless
+function returns a clear 500 instead of crashing.
 
-Run `npm run dev`. That is the entire dev environment.
+## Deployment — Vercel
 
-### 2. Staging — Vercel preview
+Repo: https://github.com/skandvijay/creovai-script-builder
+Live: https://creovai-script-builder.vercel.app
 
-- Vercel project: **`tethr-script-builder-staging`**
-- Linked git branch: **`staging`**
-- Vercel → Settings → Environment Variables:
-  - `ANTHROPIC_API_KEY = <staging key>`
-  - `NODE_ENV = staging`
+### Project setup (already done)
 
-Push to `staging` to auto-deploy, or run:
+- Vercel project: `creovai-script-builder` (or whatever you named it)
+- **Root Directory: `frontend`** — Vercel builds the Vite app from here and
+  also discovers the `frontend/api/` serverless functions.
+- Framework preset: Vite (auto-detected).
+- Env vars: `ANTHROPIC_API_KEY` (add when you have one).
 
-```bash
-npm run deploy:staging
-```
+### How routing works on Vercel
 
-### 3. Production — Vercel production
+- `GET /`         → `frontend/dist/index.html` (the built SPA)
+- `GET /assets/*` → static files from `frontend/dist/`
+- `GET /api/health`    → `frontend/api/health.js`
+- `POST /api/messages` → `frontend/api/messages.js`
 
-- Vercel project: **`tethr-script-builder`**
-- Linked git branch: **`main`**
-- Vercel → Settings → Environment Variables:
-  - `ANTHROPIC_API_KEY = <prod key>`
-  - `NODE_ENV = production`
+All of this is auto-detected by Vercel. No `vercel.json` needed.
 
-Merge to `main` to auto-deploy, or run:
+### Deploys
 
-```bash
-npm run deploy:prod
-```
-
-### One-time Vercel setup
-
-```bash
-npm i -g vercel
-vercel login
-
-# From the repo root, link this directory to each project once:
-vercel link        # pick / create tethr-script-builder-staging  → for staging branch
-vercel link        # pick / create tethr-script-builder          → for main branch
-```
-
-`vercel.json` uses Vercel's `experimentalServices` monorepo model — each
-directory is deployed as its own service:
-
-- `frontend/` (Vite) is served at `/` — everything that doesn't match another
-  prefix hits the built frontend.
-- `backend/` (Express) is mounted at `/_/backend` — so the browser hits
-  `POST /_/backend/api/messages` and Vercel routes it to the Express service.
-
-The Express app registers its handlers at both `/` and `/_/backend` (see
-`backend/server.js`), so it answers correctly regardless of whether the
-prefix is stripped before the request arrives at the service.
+Push to `main` → production deploy.
+Push to any other branch or PR → preview deploy at a unique URL.
 
 ## Branch strategy
 
-| Branch        | Deploys to            | Vercel project                     |
-| ------------- | --------------------- | ---------------------------------- |
-| `main`        | Production            | `tethr-script-builder`             |
-| `staging`     | Staging preview       | `tethr-script-builder-staging`     |
-| `development` | Local only — not deployed | —                              |
-
-Typical flow: branch off `development` → PR into `staging` for review →
-PR `staging` → `main` to ship.
+| Branch        | Deploys to                 |
+| ------------- | -------------------------- |
+| `main`        | Production                 |
+| `staging`     | Preview (same Vercel project, named branch)       |
+| feature/*     | Preview URL per push       |
 
 ## Health check
 
 ```bash
-# Direct (backend only)
-curl http://localhost:3001/health
-# { "status": "ok", "env": "development" }
+# Local
+curl http://localhost:3001/api/health
+# { "status": "ok", "env": "development", "hasKey": true }
 
-# Through the Vite dev proxy at /_/backend (what the frontend actually uses)
-curl http://localhost:5173/_/backend/health
-# { "status": "ok", "env": "development" }
+# Production
+curl https://creovai-script-builder.vercel.app/api/health
+# { "status": "ok", "env": "production", "hasKey": false }   ← false until you add the env var
 ```
 
 ## Notes
 
-- The backend is intentionally minimal — it is only an API-key proxy.
-  Don't add business logic there; keep it in the frontend.
-- The only modification we made to the supplied `App.jsx` was changing the
-  fetch URL from `https://api.anthropic.com/v1/messages` to
-  `/_/backend/api/messages`.
+- The only modification made to the supplied `App.jsx` was changing the
+  fetch URL from `https://api.anthropic.com/v1/messages` to `/api/messages`.
+- The `backend/` Express app exists only for local dev. It mirrors the
+  serverless function exactly so behaviour is identical in both environments.

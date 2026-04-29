@@ -1,5 +1,6 @@
-// Tethr Script Builder — Express proxy for the Anthropic Claude API.
-// Sole purpose: keep ANTHROPIC_API_KEY off the client.
+// Tethr Script Builder — local-dev Express proxy for the Anthropic Claude API.
+// Used by `npm run dev`. In production on Vercel, requests go to
+// frontend/api/messages.js instead (this file is NOT deployed to Vercel).
 require("dotenv").config();
 
 const express = require("express");
@@ -7,7 +8,6 @@ const cors = require("cors");
 
 const app = express();
 
-// Vercel's @vercel/node runtime parses JSON for us, but locally we still need it.
 app.use(express.json({ limit: "10mb" }));
 
 const allowedOrigin = process.env.CORS_ORIGIN || "*";
@@ -19,16 +19,19 @@ app.use(
   })
 );
 
-// All real handlers live on one router so we can mount it at multiple paths.
-// This lets the service answer whether or not Vercel's experimentalServices
-// route prefix (`/_/backend`) is stripped before the request reaches us.
-const router = express.Router();
+app.get("/api/health", (_req, res) => {
+  res.json({
+    status: "ok",
+    env: process.env.NODE_ENV || "development",
+    hasKey: Boolean(process.env.ANTHROPIC_API_KEY),
+  });
+});
 
-router.get("/health", (_req, res) => {
+app.get("/health", (_req, res) => {
   res.json({ status: "ok", env: process.env.NODE_ENV || "development" });
 });
 
-router.post("/api/messages", async (req, res) => {
+app.post("/api/messages", async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set on the server." });
@@ -61,17 +64,8 @@ router.post("/api/messages", async (req, res) => {
   }
 });
 
-app.use("/", router);
-app.use("/_/backend", router);
-
 const PORT = process.env.PORT || 3001;
 
-// Only listen when run directly (e.g. `node server.js` locally).
-// On Vercel the file is imported as a serverless function and the export below is used.
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`[tethr-backend] listening on http://localhost:${PORT} (${process.env.NODE_ENV || "development"})`);
-  });
-}
-
-module.exports = app;
+app.listen(PORT, () => {
+  console.log(`[tethr-backend] listening on http://localhost:${PORT} (${process.env.NODE_ENV || "development"})`);
+});
