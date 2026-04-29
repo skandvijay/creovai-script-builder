@@ -15,14 +15,17 @@ tethr-script-builder/
 ## Architecture
 
 ```
-Browser ──> /api/messages ──> Express proxy ──> https://api.anthropic.com/v1/messages
-                              (injects ANTHROPIC_API_KEY)
+Browser ──> /_/backend/api/messages ──> Express proxy ──> https://api.anthropic.com/v1/messages
+                                        (injects ANTHROPIC_API_KEY)
 ```
 
 - The frontend never sees the API key.
 - All Anthropic prompt constants (`DEFAULT_BUILD_SYS`, `DEFAULT_COMPARE_SYS`,
   `DEFAULT_CUSTOM_SYS`) live in `frontend/src/App.jsx`. They are not sensitive.
-- The backend has exactly two endpoints: `GET /health` and `POST /api/messages`.
+- The backend exposes exactly two routes — `GET /health` and
+  `POST /api/messages` — and they are mounted at both `/` and `/_/backend/`
+  so requests succeed whether or not Vercel's `routePrefix` is stripped
+  before the request reaches the service.
 
 ## Local development
 
@@ -52,9 +55,11 @@ npm run dev:backend     # Express on :3001
 npm run dev:frontend    # Vite on  :5173
 ```
 
-Vite's dev server proxies `/api/*` to `VITE_API_BASE_URL`
-(default `http://localhost:3001`), so the frontend always calls
-`fetch("/api/messages", ...)` regardless of environment.
+Vite's dev server proxies `/_/backend/*` to `VITE_API_BASE_URL`
+(default `http://localhost:3001`), rewriting the path to strip the
+`/_/backend` prefix — so the frontend always calls
+`fetch("/_/backend/api/messages", ...)` and the Express app receives
+`POST /api/messages`, identical to production.
 
 ## Environment variables
 
@@ -125,11 +130,17 @@ vercel link        # pick / create tethr-script-builder-staging  → for staging
 vercel link        # pick / create tethr-script-builder          → for main branch
 ```
 
-`vercel.json` builds the frontend with `@vercel/static-build` (output `dist/`)
-and the backend with `@vercel/node`. Routes:
+`vercel.json` uses Vercel's `experimentalServices` monorepo model — each
+directory is deployed as its own service:
 
-- `/api/*` → `backend/server.js` (Express function)
-- everything else → `frontend/dist/*` (static files)
+- `frontend/` (Vite) is served at `/` — everything that doesn't match another
+  prefix hits the built frontend.
+- `backend/` (Express) is mounted at `/_/backend` — so the browser hits
+  `POST /_/backend/api/messages` and Vercel routes it to the Express service.
+
+The Express app registers its handlers at both `/` and `/_/backend` (see
+`backend/server.js`), so it answers correctly regardless of whether the
+prefix is stripped before the request arrives at the service.
 
 ## Branch strategy
 
@@ -145,7 +156,12 @@ PR `staging` → `main` to ship.
 ## Health check
 
 ```bash
+# Direct (backend only)
 curl http://localhost:3001/health
+# { "status": "ok", "env": "development" }
+
+# Through the Vite dev proxy at /_/backend (what the frontend actually uses)
+curl http://localhost:5173/_/backend/health
 # { "status": "ok", "env": "development" }
 ```
 
@@ -154,4 +170,5 @@ curl http://localhost:3001/health
 - The backend is intentionally minimal — it is only an API-key proxy.
   Don't add business logic there; keep it in the frontend.
 - The only modification we made to the supplied `App.jsx` was changing the
-  fetch URL from `https://api.anthropic.com/v1/messages` to `/api/messages`.
+  fetch URL from `https://api.anthropic.com/v1/messages` to
+  `/_/backend/api/messages`.

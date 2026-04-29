@@ -91,7 +91,7 @@ function extractAndRepairJSON(raw) {
 }
 
 async function callAPI(system, content, maxTokens) {
-  const res = await fetch("/api/messages", {
+  const res = await fetch("/_/backend/api/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

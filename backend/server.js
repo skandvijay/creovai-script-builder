@@ -19,11 +19,16 @@ app.use(
   })
 );
 
-app.get("/health", (_req, res) => {
+// All real handlers live on one router so we can mount it at multiple paths.
+// This lets the service answer whether or not Vercel's experimentalServices
+// route prefix (`/_/backend`) is stripped before the request reaches us.
+const router = express.Router();
+
+router.get("/health", (_req, res) => {
   res.json({ status: "ok", env: process.env.NODE_ENV || "development" });
 });
 
-app.post("/api/messages", async (req, res) => {
+router.post("/api/messages", async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set on the server." });
@@ -55,6 +60,9 @@ app.post("/api/messages", async (req, res) => {
     res.status(502).json({ error: "Upstream request failed", detail: String(err && err.message) });
   }
 });
+
+app.use("/", router);
+app.use("/_/backend", router);
 
 const PORT = process.env.PORT || 3001;
 
