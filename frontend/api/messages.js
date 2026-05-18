@@ -1,20 +1,9 @@
-// Vercel serverless function — POST /api/messages
-// Forwards the request to Anthropic and injects ANTHROPIC_API_KEY on the server.
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return res
-      .status(500)
-      .json({ error: "ANTHROPIC_API_KEY is not set on the server." });
-  }
-
-  // Vercel parses req.body from JSON automatically when Content-Type is application/json.
-  // Fall back to a manual read just in case.
   let body = req.body;
   if (body == null || (typeof body === "string" && body.length === 0)) {
     body = await new Promise((resolve, reject) => {
@@ -32,23 +21,86 @@ export default async function handler(req, res) {
   }
 
   try {
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(body),
-    });
+    const { provider = "openai", model, system, content, maxTokens } = body || {};
 
-    const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader(
-      "Content-Type",
-      upstream.headers.get("content-type") || "application/json"
-    );
-    res.send(text);
+    if (!system || !Array.isArray(content)) {
+      return res.status(400).json({ error: "Expected system string and content array." });
+    }
+
+    if (provider === "openai") {
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({ error: "OPENAI_API_KEY is not set on the server." });
+      }
+
+      const upstream = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: model || "gpt-4.1",
+          instructions: system,
+          input: [
+            {
+              role: "user",
+              content: content.map((item) => {
+                if (item.type === "text") {
+                  return { type: "input_text", text: item.text || "" };
+                }
+                if (item.type === "image" && item.source?.type === "base64") {
+                  return {
+                    type: "input_image",
+                    image_url: `data:${item.source.media_type || "image/png"};base64,${item.source.data}`,
+                    detail: "auto",
+                  };
+                }
+                throw new Error(`Unsupported content item type: ${item.type}`);
+              }),
+            },
+          ],
+          max_output_tokens: maxTokens || 8000,
+        }),
+      });
+
+      const data = await upstream.json();
+      if (!upstream.ok) {
+        return res.status(upstream.status).json(data);
+      }
+      return res.status(200).json({ outputText: data.output_text || "", provider: "openai", model: model || "gpt-4.1" });
+    }
+
+    if (provider === "claude") {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set on the server." });
+      }
+
+      const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: model || "claude-sonnet-4-20250514",
+          max_tokens: maxTokens || 8000,
+          system,
+          messages: [{ role: "user", content }],
+        }),
+      });
+
+      const data = await upstream.json();
+      if (!upstream.ok) {
+        return res.status(upstream.status).json(data);
+      }
+      const outputText = (data.content || []).map((b) => b.text || "").join("");
+      return res.status(200).json({ outputText, provider: "claude", model: model || "claude-sonnet-4-20250514" });
+    }
+
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   } catch (err) {
     res.status(502).json({
       error: "Upstream request failed",

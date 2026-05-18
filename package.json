@@ -8,7 +8,7 @@
     "dev": "concurrently \"cd backend && node server.js\" \"cd frontend && vite\"",
     "dev:frontend": "cd frontend && vite",
     "dev:backend": "cd backend && node server.js",
-    "build": "cd frontend && vite build",
+    "build": "npm --prefix frontend run build",
     "deploy:staging": "vercel --target preview",
     "deploy:prod": "vercel --prod"
   },

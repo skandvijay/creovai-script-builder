@@ -1,4 +1,4 @@
-// Tethr Script Builder — local-dev Express proxy for the Anthropic Claude API.
+// Tethr Script Builder — local-dev Express proxy for OpenAI and Claude.
 // Used by `npm run dev`. In production on Vercel, requests go to
 // frontend/api/messages.js instead (this file is NOT deployed to Vercel).
 require("dotenv").config();
@@ -23,7 +23,8 @@ app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
     env: process.env.NODE_ENV || "development",
-    hasKey: Boolean(process.env.ANTHROPIC_API_KEY),
+    hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
+    hasAnthropicKey: Boolean(process.env.ANTHROPIC_API_KEY),
   });
 });
 
@@ -32,33 +33,91 @@ app.get("/health", (_req, res) => {
 });
 
 app.post("/api/messages", async (req, res) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set on the server." });
-  }
-
   try {
-    // Use global fetch on Node 18+; fall back to node-fetch otherwise.
     const fetchFn =
       typeof fetch === "function"
         ? fetch
         : (...args) => import("node-fetch").then(({ default: f }) => f(...args));
+    const { provider = "openai", model, system, content, maxTokens } = req.body || {};
 
-    const upstream = await fetchFn("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(req.body),
-    });
+    if (!system || !Array.isArray(content)) {
+      return res.status(400).json({ error: "Expected system string and content array." });
+    }
 
-    const text = await upstream.text();
-    res.status(upstream.status);
-    const contentType = upstream.headers.get("content-type") || "application/json";
-    res.setHeader("Content-Type", contentType);
-    res.send(text);
+    if (provider === "openai") {
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({ error: "OPENAI_API_KEY is not set on the server." });
+      }
+
+      const upstream = await fetchFn("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: model || "gpt-4.1",
+          instructions: system,
+          input: [
+            {
+              role: "user",
+              content: content.map((item) => {
+                if (item.type === "text") {
+                  return { type: "input_text", text: item.text || "" };
+                }
+                if (item.type === "image" && item.source?.type === "base64") {
+                  return {
+                    type: "input_image",
+                    image_url: `data:${item.source.media_type || "image/png"};base64,${item.source.data}`,
+                    detail: "auto",
+                  };
+                }
+                throw new Error(`Unsupported content item type: ${item.type}`);
+              }),
+            },
+          ],
+          max_output_tokens: maxTokens || 8000,
+        }),
+      });
+
+      const data = await upstream.json();
+      if (!upstream.ok) {
+        return res.status(upstream.status).json(data);
+      }
+      return res.json({ outputText: data.output_text || "", provider: "openai", model: model || "gpt-4.1" });
+    }
+
+    if (provider === "claude") {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set on the server." });
+      }
+
+      const upstream = await fetchFn("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: model || "claude-sonnet-4-20250514",
+          max_tokens: maxTokens || 8000,
+          system,
+          messages: [{ role: "user", content }],
+        }),
+      });
+
+      const data = await upstream.json();
+      if (!upstream.ok) {
+        return res.status(upstream.status).json(data);
+      }
+      const outputText = (data.content || []).map((b) => b.text || "").join("");
+      return res.json({ outputText, provider: "claude", model: model || "claude-sonnet-4-20250514" });
+    }
+
+    return res.status(400).json({ error: `Unsupported provider: ${provider}` });
   } catch (err) {
     res.status(502).json({ error: "Upstream request failed", detail: String(err && err.message) });
   }

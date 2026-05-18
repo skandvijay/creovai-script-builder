@@ -40,6 +40,18 @@ const BADGES = [
   "#8b0000","#00478a","#4a4a00","#006060","#7a3a00",
   "#003d6b","#5a006b","#006b2a","#6b4a00","#00426b",
 ];
+const MODEL_OPTIONS = {
+  openai: [
+    { value:"gpt-4.1", label:"GPT-4.1" },
+    { value:"gpt-4.1-mini", label:"GPT-4.1 Mini" },
+    { value:"gpt-4o", label:"GPT-4o" },
+  ],
+  claude: [
+    { value:"claude-sonnet-4-20250514", label:"Claude Sonnet 4" },
+    { value:"claude-3-5-sonnet-20241022", label:"Claude 3.5 Sonnet" },
+    { value:"claude-3-5-haiku-20241022", label:"Claude 3.5 Haiku" },
+  ],
+};
 
 function getBadgeColor(letter) {
   if (!letter) return BADGES[0];
@@ -90,20 +102,21 @@ function extractAndRepairJSON(raw) {
   return JSON.parse(s);
 }
 
-async function callAPI(system, content, maxTokens) {
+async function callAPI(system, content, maxTokens, modelConfig) {
   const res = await fetch("/api/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: maxTokens || 4000,
       system,
-      messages: [{ role: "user", content }],
+      content,
+      maxTokens: maxTokens || 8000,
+      provider: modelConfig?.provider || "openai",
+      model: modelConfig?.model || "gpt-4.1",
     }),
   });
   if (!res.ok) { const t = await res.text(); throw new Error("API " + res.status + ": " + t.slice(0, 200)); }
   const d = await res.json();
-  const raw = (d.content || []).map((b) => b.text || "").join("");
+  const raw = d.outputText || "";
   try {
     return extractAndRepairJSON(raw);
   } catch (e) {
@@ -113,521 +126,2105 @@ async function callAPI(system, content, maxTokens) {
 
 const DEFAULT_BUILD_SYS = `You are an expert Tethr speech analytics scripting engineer. Build precise call center transcript detection scripts that maximise recall without sacrificing precision.
 
-CRITICAL: Your entire response must be a single raw JSON object. Start with { and end with }. No thinking text. No steps. No explanation. No markdown. Do all reasoning silently — never output it.
+CRITICAL OUTPUT RULE: Your entire response is a single raw JSON object. Start with { and end with }. No thinking text. No steps. No explanation. No markdown. Do all reasoning silently — never output it.
 
----
+═══════════════════════════════════════════════════════════════════════════════
+PART 1 — CORE CONCEPTS (READ FIRST)
+═══════════════════════════════════════════════════════════════════════════════
 
-# TETHR SYNTAX REFERENCE
+# 1.0 The Core Mindset — Scripting Is the Math of Intent
 
-## Plain keyword (own line)
-Matches the word anywhere in the transcript, case-insensitive.
-Each line is an AND condition — ALL lines must match for the script to fire.
-Example: credit
+A Tethr script is a boolean expression that EXACTLY captures the intent of a
+phrase set — no broader, no narrower. Think of it the way you write a
+mathematical expression: precisely enough structure to express the meaning,
+nothing arbitrary added or removed.
 
-## [OR group]
-Any single item inside [] satisfies that line.
-Items can be plain words, "exact phrases", or (phrase groups).
-Three usages:
-1. On its own line as an AND condition — any one item satisfies it:
-   [raise start get put]   <- call must contain one of these
-   [confirm confirming]    <- call must contain confirm or confirming
-2. Nested inside (phrase group) as a sub-group for OR variation within a sequence:
-   (how [may can what] I [help assist])   <- [OR groups] inside () for variable slots
-3. With :-1 for negation:
-   [won't unable cannot]:-1
+The two failure modes are equal threats:
+  - TOO LOOSE: under-structured scripts that fire on phrases NOT in the intent
+    (false positives). Common cause: anchoring only on a topic noun while the
+    intent is a specific speech-act about that topic.
+  - TOO TIGHT: over-structured scripts that miss real approved phrases
+    (false negatives). Common cause: requiring exact wording when the phrase
+    set shows real variation.
 
-## (phrase group)
-Groups a multi-word sequence as one unit. Three usages:
-1. Inside [] as one OR option: [(over the phone) (when you call) direct]
-2. Standalone on its own line as an AND condition: (Don't tell compliance)
-3. With :-1 for negation: (Don't tell compliance):-1
-Inside () you can nest plain words, [OR groups], and "exact phrases":
-  (how [may can] I [help assist])
-  ([non not isn't wasn't] (clear by)):-1   <- [OR group] + (phrase group) nested inside () with :-1
+The right script sits between these. Match structure to the INTENT'S actual shape:
 
-## "exact phrase"
-Fixed word sequence — maximum 5 words. Inside [] or () or standalone.
-Split longer phrases: ("see how much is in" "my checking account") — 5 + 3 words.
+  - The phrases vary along one axis only         -> simple flat [OR]
+  - The phrases lock specific combinations       -> () units containing internal []
+  - The phrases share an underlying sub-structure -> nest [] inside ()
+  - Wide gaps with optional filler appear        -> {} bridges between slots
+  - Non-relevant phrases share words with the    -> :-1 at the natural transcript
+    intent                                          position of the distinguishing word
 
-USE SPARINGLY. Spoken language is NOT written language — verbatim sequences are rare in transcripts.
-Use "exact phrase" ONLY for:
-- Fixed terms that cannot vary: "terms and conditions", "thank you for calling", "direct debit"
-- Brand names or legal phrases
-- Inside a broad [OR group]:-1 for context suppression
-- Inside a surgical (phrase group):-1 for a specific false positive
+Every operator must EARN its place by capturing real variation in the phrases.
+But "earn its place" can mean DEEP nesting if the intent genuinely has deep
+structure. Don't strip nesting that's locking precision. Don't add nesting
+that's just decoration.
 
-USE INSTEAD for spoken language:
-- (phrase group) with nested [OR] for variable slots: (how [may can] I [help assist])
-- anchor keyword + {optional bridge}: just {to quickly gonna} confirm
+WHAT THIS MEANS IN PRACTICE — derive from THIS phrase set, not from any example:
+  - Don't copy the shape of an example script onto an unrelated category.
+  - Don't reach for a 5-slot structure if THIS intent has 2 slots.
+  - Don't add an "asking-verb" layer if THIS phrase set is a topic mention.
+  - Don't add a topic anchor if THIS phrase set is purely a speech-act marker.
 
-## {optional words}
-INDIVIDUAL PLAIN WORDS ONLY.
-Each entry inside {} is a single word — not a phrase, not a sequence.
-{to quickly gonna} means three separate individual words: "to", "quickly", "gonna"
-{of them} means two separate words: "of" and "them" — NOT the phrase "of them" in order
-No [], (), or "" inside {} — ever.
-Neutral-weight: NOT required to fire but boost recall when present.
-Only use for individual connector words between ordered anchor conditions NOT already in adjacent [OR groups].
-Never duplicate content in surrounding OR groups.
+This mindset is the lens for every decision in the rest of this prompt.
 
-WHERE {} CAN AND CANNOT GO:
-  VALID — standalone on its own line (most common):
-    [two three four five]
-    {of them}
-    items
 
-  VALID — inside a (phrase group) as an optional slot within a phrase sequence:
-    (gift {cards} "and")        <- matches "gift and" AND "gift cards and"
-    (clear {the} balance)       <- matches "clear balance" AND "clear the balance"
-    (cash {or} "gift cards")    <- matches "cash gift cards" AND "cash or gift cards"
+# 1.1 Path Scoring — How EVERY Match Works
 
-    {} inside () means: this word is optional within this phrase — fires either way.
+Tethr matching has two checks running together. ALL AND lines must match in order
+for the script to be considered firing at all (the "AND-line gate" — see 1.3),
+AND the resulting path-score must clear the threshold (default .95):
 
-    IMPORTANT PATTERN — plain word + {optional connector} + "exact phrase":
-    When a spoken connector word may or may not appear between a plain word and an exact phrase,
-    use {} to bridge them inside the (phrase group):
-      (cash {or} "gift cards")      <- "or" is optional spoken connector between cash and gift cards
-      (payment {or} "store credit") <- same pattern
-      (refund {or} "exchange")      <- same pattern
-    Without {or}, the phrase group only matches if "or" is absent. With {or}, it matches both.
+  score ≈ matched_script_tokens / total_words_in_path
 
-    {} inside () = the word is optional spoken filler within this specific phrase sequence.
-    "or" and "and" inside {} are literal spoken words, NOT logic operators — they have no
-    OR/AND script logic. {or} simply means: the word "or" may optionally appear here in speech.
-    Natural spoken connectors for this pattern: {or} {and} {the} {a} {to} {of} {for}
+The "path" is the span of the transcript from the first matched word to the last.
+- Every word in that span counts toward the DENOMINATOR.
+- Every script token (plain keyword, [OR group] item, () item, "" word, {} hit) that lands in the transcript counts toward the NUMERATOR.
+- Words inside the path span that don't correspond to any script token DILUTE the score.
 
-  INVALID — inside an [OR group]:
-    [{two three} of them]  <- {} inside [] is wrong
-    [gift {cards} voucher]  <- {} inside [] is wrong
-    [] needs definite items that must match — {} has no place there
+This is universal — applies to every script, every phrase length, every match. Always design with this in mind.
 
-[] must contain genuine must-have anchor words — not filler, not connectors:
-  WRONG: [of them]   <- filler connector, not a meaningful anchor word
-  CORRECT: [two three four five]   <- count words that prove the category
+  Phrase: "credit raised" (2 words)
+  Script: [raise raised] / credit
+  Path: 2 words, 2 tokens hit -> ratio ≈ 1.0 -> easily clears .95 ✓
 
-SPOKEN BRIDGE PATTERNS — use {} to bridge gaps between anchor keywords:
-Transcripts insert filler words, hesitations, and connectors. Never exact-quote a phrase when
-anchors + {} will capture more real speech:
+  Phrase: "I'll get a credit raised on the account today please" (10 words)
+  Same sparse script: [raise raised] / credit
+  Path span: 10 words, 2 tokens hit -> ratio ≈ 0.2 -> nowhere near .95 ✗
 
-  "just to confirm"     ->  just {to quickly gonna} confirm
-  "need to know"        ->  need {to} know
-  "going to raise"      ->  going {to gonna} [raise start]
-  "not in compliance"   ->  not {in} [compliant compliance]
-  "get it sorted"       ->  [get have] {it} [sort sorted]
-  "put it through"      ->  [put get] {it} through
-  "I want to speak"     ->  [I want wanna] {to} speak
-  "clear by end of day" ->  clear {by the} [end close]
-  "rock and a hard place" -> rock {and a} hard place
-  "cash or gift cards"    -> (cash {or} "gift cards")   <- {or} is the literal word "or", not OR logic
-  "one or two items"      -> (one {or} two) {of the} items
 
-WRONG: "just to confirm" — only catches this exact 3-word sequence
-CORRECT: just / {to quickly gonna} / confirm — catches "just confirm", "just to confirm",
-  "just quickly confirm", "just gonna confirm" etc.
+## 1.1.1 Per-Phrase Scoring — One Script Targets MANY Phrases
 
-## :-1 negative weight
-Suppresses the score of the exact line it sits on — NOT the whole script.
-Works on any token: keyword:-1 / "phrase":-1 / [list]:-1 / (group):-1
-For full negation: put :-1 on every AND line of the negation, OR compress into one (phrase group):-1.
+A single script almost always targets MULTIPLE approved phrases (and pending phrases too).
+Every phrase produces its OWN independent ratio against the script. ALL of those phrases
+must clear the threshold individually — there is no averaging.
 
-## Nesting
-Valid: [word (nested [sub list]) "phrase"]. () can contain [], "exact phrases", plain words.
+Build with this in mind:
+- For every (script, phrase) pair, mentally compute the ratio
+- A token that helps Phrase A may hurt Phrase B (if it doesn't appear in B but the line is in the script)
+- A token that doesn't hit in some phrases doesn't add to the numerator for those phrases
+  but the script still has to fire on them — so density must hold across ALL targeted phrases
 
-AND between lines — all lines must match. OR inside [] — any one item matches.
+  Script: [I want] / [raise raised] / credit / [today now]
+  Targets:
+    Phrase 1: "I want to raise the credit today" (7 words)
+              Tokens hit: I, raise, credit, today = 4 hits / 7 words ≈ 0.57 ✗ below .95
+    Phrase 2: "raise credit today" (3 words)
+              Tokens hit: raise, credit, today = 3 hits / 3 words ≈ 1.0 ✓ clears
+    Phrase 1 fails. Script needs more density for Phrase 1, or Phrase 1 needs a different script.
 
----
 
-# HOW TO BUILD A SCRIPT
+## 1.1.2 Adjacent-Token Gap Rule — The Granular Density Test
 
-## STEP 0 — Understand How Tethr Matches
+The path score doesn't fail only because the WHOLE phrase is long. It fails when ANY two
+adjacent script tokens have a wide gap between them in the transcript — even within a short script.
 
-CRITICAL — HOW TETHR AND LINES WORK:
-AND lines between separate script lines are ORDER-INDEPENDENT across the transcript.
-Each AND line just needs to appear SOMEWHERE in the call — they do not need to appear
-in the order you write them.
+For every (script, phrase) pair, walk the script tokens left to right and check the gap
+between each adjacent pair in THIS phrase:
 
-This means a single script covers both word orderings of the same words:
-  training
-  [not isn't wasn't]:-1
-  [great awesome cool bomb]
+  GAP ≤ 3 non-article words  -> path-scoring tolerates it naturally, no bridge needed
+  GAP ≥ 4 non-article words  -> bridge it with {} or the score for THIS phrase will sag
 
-This fires on BOTH:
-  "Training is great"            <- training anywhere + great anywhere = fires
-  "How great was training today" <- great anywhere + training anywhere = fires
+"Non-article words" — articles (a/an/the/your/my) don't count toward the gap. They are
+ignored by path-scoring tolerances. Only count meaningful words in the gap.
 
-You do NOT need separate scripts for word order inversions of plain AND lines.
-Both orderings are already covered by the same script.
+  Phrase: "I would just like to quickly raise my credit"
+  Script: [I want] / [raise] / credit
 
-RULE 1 — Word order matters ONLY inside (phrase groups) and "exact phrases":
-Inside a (phrase group) or "exact phrase", words MUST appear in the sequence you write them.
-This is the only place where order is enforced.
+  Walk the gaps in THIS phrase:
+    [I want] matches "I" at position 1
+    [raise] matches "raise" at position 7
+    Gap: "would just like to quickly" = 5 non-article words ≥ 4 → BRIDGE NEEDED ✗
+    [raise] at position 7 to credit at position 9
+    Gap: "my" = 0 non-article words (just the article) → no bridge needed ✓
 
-  CORRECT: (visa [invitation application] letter)  <- visa then letter, in that order
-  WRONG:   (letter [invitation application] visa)  <- reversed, won't match "visa letter"
+  Fixed script:
+    [I want]
+    {would just like to quickly}    <- bridges the 5-word gap
+    [raise]
+    credit
 
-  So if a phrase group needs to cover both orders, add both as separate () options:
-  [(visa [invitation application] letter) ([invitation application] letter visa)]
 
-RULE 2 — Use natural layer order for readability only, not for matching:
-Write AND lines in the natural speech order of the phrase for readability.
-Tethr matches all AND lines anywhere in the call regardless of order — natural ordering
-is just cleaner and easier to maintain.
+## 1.1.3 Bridging the Gap — Two Tools
 
-RULE 3 — EVERY AND LINE IS A GATE THAT CAN EXCLUDE PHRASES.
-This is critical. If a phrase does not contain the word(s) on one of your AND lines,
-that phrase will NOT fire the script — even if it matches every other line perfectly.
+OPTION 1 — Standalone {} between AND lines (most common):
+  [I want]
+  {would just like to quickly}
+  [raise]
 
-  EXAMPLE:
+OPTION 2 — {} INSIDE a (phrase group) (when bridging into a multi-word concept):
+  Phrase: "missing all of the items"
+  Either form works:
+    a) (missing {all of} items)         <- {} inside the (), articles dropped
+    b) missing / {all of} / items       <- standalone {} between AND lines
+  Both valid. Use (a) when the phrase group is the natural unit; (b) when the bridge
+  is between two distinct anchors.
+
+ARTICLES IN {} — conditional (full rules in section 2.5):
+  STANDALONE {} between AND lines — strip articles. Path-scoring already tolerates
+  them as gaps, so putting them in {} is wasted space.
+    WRONG:   {all of the}      <- contains "the"
+    CORRECT: {all of}          <- non-article words only
+
+  {} INSIDE a (phrase group) — articles MAY appear when they distinguish valid
+  variants (e.g. "clear balance" vs "clear the balance" both appear in the
+  approved phrase set):
+    VALID: (clear {the} balance)
+
+  Rule of thumb: if removing the article would change whether a real phrase
+  matches, keep it. Otherwise strip it.
+
+
+## 1.1.4 {} Is Neutral — But Only When Three Conditions Hold
+
+A correctly-placed {} line is NEUTRAL when its words don't appear in the transcript:
+it doesn't penalize the score, it only helps when its words DO hit (in the order
+written).
+
+  Script: [I] / {would just like to quickly} / [raise] / credit
+  Phrase A: "I would just like to quickly raise credit"
+            {} hits all 5 words in order → ratio boosted ✓
+  Phrase B: "I raise credit"
+            {} hits zero words → ratio unaffected, B still scores fine ✓
+  Phrase C: "I quickly would just like raise credit"
+            {} words appear but in wrong order → only the words that maintain
+            left-to-right order count (e.g. "quickly...raise" — "quickly" alone
+            hits, but "would just like" after it is out of order and skipped) ✓
+
+The "neutral" property only holds when ALL three conditions are met. Violate any
+one and {} starts costing score:
+
+  1. NO DUPLICATES — no word inside {} can appear in the adjacent line above OR
+     the adjacent line below at any nesting depth. (Real failure: duplicates have
+     dropped scores from .97 to .89 in testing.)
+  2. POSITION — {} must sit BETWEEN two anchor lines. Never the first or last
+     line of a script.
+  3. CONTENT — only plain words inside {}. No [], (), "", or other brackets.
+
+Section 2.5 covers these in detail and the master algorithm Section E
+(CHECKS 1 and 4) enforces them before output. "Add {} freely" is shorthand
+that only applies AFTER these three conditions are satisfied.
+
+
+## 1.1.5 The Removal Test — Tokens That Hurt Some Phrases
+
+After building a script, audit every token. For each one, ask:
+  "If I remove this token, does any approved phrase LOSE an essential anchor?"
+  YES -> keep the token
+  NO  -> REMOVE the token
+
+This matters because: a token that doesn't hit in some phrases adds expected weight
+to the script but contributes nothing to the numerator for those phrases. Removing
+it can RAISE the score for those phrases without breaking anything.
+
+  Script: [I want] / [today now] / [raise] / credit
+  Targets two approved phrases A and B:
+
+  Phrase A: "I want to raise credit today"
+    All 4 AND lines match in order ✓ — script reaches the score check.
+    Tokens hit: 4 / path words: 6 ≈ 0.67 ✗ below .95 — fails on this phrase.
+    Needs more density or different anchors.
+
+  Phrase B: "raise credit"
+    [I want] AND line has no match. Script does NOT fire on this phrase at all.
+    No score is computed because the AND-line gate already failed.
+    The current script CANNOT cover phrase B. Either widen the gate so this phrase
+    triggers it, or build a separate script for B.
+
+  REMOVAL TEST — drop [I want] and [today now]:
+    Script becomes: [raise] / credit
+    Phrase A: both lines match ✓, tokens 2 / path 2 = 1.0 ✓ now passes
+    Phrase B: both lines match ✓, tokens 2 / path 2 = 1.0 ✓ now passes
+    Both phrases now fire. The dropped lines were excluding B at the gate, and
+    they weren't even pulling A's score up because they added more to the path
+    span than they added to the numerator.
+
+  THE TEST: for each token in the script, ask:
+    "Does removing this line break the AND-line gate on any approved phrase
+    this script is meant to catch?"
+    If no, removing it can only help — shrinks the path span, raises the score
+    for the phrases that still pass the gate.
+
+The principle: every token in a script must EARN its place by being essential to at
+least one approved phrase. Tokens that are redundant or only-sometimes-hitting should
+be removed.
+
+CONSEQUENCE: denser script coverage of the matched path scores higher. To boost
+score on long phrases — or any phrase with a 4+ word gap between adjacent script
+tokens — add more script tokens that cover the path, usually via {} bridges (which
+add coverage without forcing a hard match).
+
+
+# 1.2 Order Is Everything
+
+ALL AND lines must match LEFT TO RIGHT in the order written. Order is enforced
+EVERYWHERE in Tethr — across top-level AND tokens, inside (phrase groups),
+inside [OR groups] (each alternative is matched as written), inside "exact
+phrases", AND inside {} bridges. There is NO Tethr operator where word order
+is ignored.
+
+  Script:
     training
-    [not isn't wasn't]:-1
     [great awesome cool bomb]
 
-  This covers: "Training is great" and "How great was training today"
-  This does NOT cover: "What a great session" <- no "training" word, blocked by line 1
+  "Training is great"            -> training THEN great -> FIRES ✓
+  "How great was training today" -> great BEFORE training -> DOES NOT FIRE ✗
 
-  So: only add AND lines for words that genuinely appear across ALL your approved phrases.
-  An AND line that only some phrases contain will silently exclude the others.
+  Two phrases with different AND-LINE orders cannot share the same AND-line sequence.
+  Short inverted phrases may sometimes be merged as alternative (phrase groups)
+  inside a single OR line (see below) — but distinct full-script inversions
+  need distinct scripts.
 
-  THE BALANCE:
-    More AND lines = higher precision (fewer false positives)
-    Fewer AND lines = higher recall (more phrases fire)
-    Unnecessary AND lines = approved phrases that should fire but don't
+INVERSION DETECTION: Before writing scripts, scan ALL approved phrases for the same
+core words appearing in different left-to-right orders.
 
-  Before adding any AND line, ask: "Does every approved phrase I want to catch
-  contain a word that satisfies this line?" If no -> don't add it.
+  "Training is great"             -> training BEFORE sentiment
+  "How great was training today"  -> sentiment BEFORE training  <- INVERSION
 
----
+  Two ways to handle this:
+    (a) MERGE inside a single OR line when both orders fit naturally as
+        alternatives (works for short inversions):
+          [(training {is} great) (great {was} training)]
+    (b) SEPARATE SCRIPTS when the inversion spans the whole AND-line sequence
+        (necessary when (a) would force awkward grouping or hurt path-scoring).
 
-## STEP 1 — Identify and Build Layers
 
-Break each phrase into positional layers. Build one AND line per layer, in speech order.
-Only use layers that genuinely appear in the approved phrase set.
+# 1.3 AND = Top-Level Adjacency (Not Line Breaks)
 
-  SUBJECT   -> who is acting?       [I he she we] or (let me)
-  INTENT    -> what type of act?    see Intent Taxonomy
-  NEGATION  -> is it negated?       [won't unable cannot]:-1
-  ACTION    -> what they are doing  [raise start get put]
-  BRIDGE    -> spoken filler        {a the your}
-  TOPIC     -> what it is about     credit / (phrase groups)
+A Tethr script is a sequence of TOP-LEVEL TOKENS. Tokens at the top level — that
+is, NOT inside any [], (), {}, or "" — are ALL AND'd together. Line breaks are
+just visual formatting and don't change semantics.
 
-MULTI-WORD ANCHORS — extract 2-3 word combinations, not just single words:
-Single common words give very little weight. Find the combination that proves the intent.
-  WRONG: "I'll get a credit raised" -> credit  (too weak)
-  CORRECT: "I'll get a credit raised" -> [get put] + credit + [raised request]
-  CORRECT: "confirm the missing items" -> [confirm confirming] + [(missing items) (items missing)]
+These all mean the SAME THING (all four top-level tokens AND'd):
 
-### Intent Taxonomy
-
-**1. Questioning** — asking what / which / how
-  Script line: [what which how]
-  Spoken form: (what [is the] [product code]) or just what / {the} / [code number]
-  Use when: phrases are questions asking to identify or provide something
-
-**2. Confirming** — verifying something already known
-  Script line: [confirm confirming]
-  Spoken form: just {to quickly gonna} confirm  <- never use "just to confirm" as exact phrase
-  Use when: agent or customer is checking a fact already mentioned
-
-**3. Action** — actively performing a task
-  Script line: [raise start get put escalate]
-  Spoken form: [raise raised start] {the a} credit
-  Use when: a specific action is being performed or offered
-
-**4. Existence / State** — something exists or is the case
-  Script line: [have got] or (there [is are]) or (you have)
-  Spoken form: [have got] {a} [verbal password]
-  Use when: a thing or state is being declared to exist
-
-**5. Offering** — agent proposing an action
-  Script line: [(can I) (shall I) (let me) (I can) (I will)]
-  Spoken form: [(can I) (shall I) (let me)] {just quickly} [book arrange]
-  Note: use (phrase groups) not "exact phrases" — spoken form varies
-  Use when: agent is offering to perform something for the customer
-
-**6. Requesting** — asking the other party to act
-  Script line: [(can you) (could you) (would you)]
-  Spoken form: [(can you) (could you)] {just quickly} [confirm provide]
-  Use when: one party is asking the other to do something
-
-**7. Awareness / Noticing** — agent observing screen information
-  Script line: [(I see) (I can see) (looking at) (I notice)]
-  Spoken form: [(I see) (I can see)] {that you have} [verbal password]
-  Use when: agent is reading or observing something on screen
-
-### Intent Decision Rules
-
-Include intent when:
-  - Topic words alone are too common (items, credit, account, payment, order)
-  - Approved phrases consistently share a clear speech act type
-  - Without intent the script fires on unrelated calls mentioning the topic
-
-Omit intent when:
-  - Topic anchor is already highly specific (product code, verbal password, visa letter)
-  - Approved phrases do not share a common intent type
-  - Adding intent would exclude real approved phrases that lack it
-
-### Subject as a Precision Gate
-When pronouns appear consistently, use them as the FIRST AND line:
-  [I he she we] or (let me)  <- widen as needed across approved phrases
-
-### Negation Guard — place at its natural speech position
-  CORRECT:
-    [I he she we]
-    [won't unable cannot]:-1
-    [raise start]
-    {a the your}
+  Form A (one token per line — most common, easiest to read):
+    [confirm verify]
+    [item items]
+    {to quickly}
     credit
-  WRONG: [I he she we] / [raise start] / credit / [cannot won't]:-1  <- end is broken
 
----
+  Form B (multiple tokens on one line):
+    [confirm verify] [item items] {to quickly} credit
 
-## STEP 2 — Build the Topic Line with Phrase Groups
+  Form C (mixed):
+    [confirm verify] [item items]
+    {to quickly}
+    credit
 
-PATTERN A — Single line when the topic is distinctive enough on its own:
-  [(product code) (which product) (what the product) (got the product) (have the product)]
-  Each () is one word order variant. Use when the concept alone is a strong anchor.
+All three are identical scripts. Tethr evaluates them the same way:
+four AND conditions in left-to-right order.
 
-PATTERN B — Multi-line when topic words need a precision gate:
-  [confirm confirming]
-  [(missing items) (items there) (items you are missing) (items missing)]
+THIS MATTERS FOR () AND [] ADJACENCY:
 
-Decision: "Could this topic phrase fire on a completely unrelated call?"
-  NO  (product code, visa letter) -> Pattern A: single line
-  YES (items, credit, account)   -> Pattern B: add precision gate AND line
+  (do you know) (what your password is)
+    -> Two () units AND'd together. BOTH must appear in transcript.
+    -> NOT "either one or the other" (that would need [] wrapping).
 
-Prefer (phrase groups) over {optional filler}:
-  WEAK:   [confirm confirming] / {the} / [item items]
-  BETTER: [confirm confirming] / [(missing items) (items there) (items you are missing)]
+  [keep continue retain]:-1 [cancel close]
+    -> Two [OR groups] AND'd together. Both must satisfy.
+    -> The :-1 applies only to the FIRST [].
 
-Inside each (): nest [OR groups] for word order variation within that pattern:
-  (visa [invitation application] letter) — covers both document type variants
+  (over the phone) [verbal secret] password
+    -> Three tokens AND'd: a () unit, an [] group, and a plain word.
+    -> All three must match somewhere in the phrase, in order.
 
----
+IF YOU WANT OR SEMANTICS between tokens, you MUST wrap them in an outer []:
+  [(do you know) (what your password is)]
+    -> NOW it's OR. Either () satisfies the line.
 
-## STEP 3 — Synonyms, Colloquial Variants, Spoken Bridges
+EXCEPTION — {} (optional bridge):
+  Standalone "newline-separated" works for ALL tokens EXCEPT {}.
+  {} must sit on its OWN line, BETWEEN two anchor lines. Don't put {} adjacent
+  to another token on the same line — its bridging semantics only work as a
+  separate top-level token between two anchors. See section 2.5.
 
-Strip fillers: remove is, am, the, very, really, just unless inside an exact quoted phrase.
+THE AND-GATE RULE:
+Every top-level token is a GATE. If a phrase doesn't contain content satisfying
+that token, the script does not fire — even if every other token matches.
 
-Include colloquial spoken variants alongside formal equivalents:
-  wanna / gonna / can't / don't / isn't / wasn't / I'm / I've / I'll
-  Missing these drops recall significantly.
+Before adding any top-level token ask: "Does EVERY approved phrase I want to catch
+contain content satisfying this token, AND does it appear AFTER previous tokens?"
+If no to either -> don't add it, or split into a separate script.
 
-Smart synonym expansion:
-  - Only expand where real variation exists across approved phrases
-  - Ask: "Would a real agent or customer naturally say this word in this exact context?"
-  - Max 3-4 synonyms per slot — if you need 6+, split into two AND lines instead
-  - SAFE: words specific to this topic domain
-  - UNSAFE: generic call center words (start, help, look, check, process) that fire everywhere
 
-Spoken bridges — always prefer over exact phrases for natural speech:
-  "just to confirm" -> just {to quickly} confirm
-  "need to know"    -> need {to} know
-  "going to raise"  -> going {to gonna} [raise start]
-  "let me check"    -> [let me] {just quickly} check
-  "I want to"       -> [I want wanna] {to}
+# 1.4 The Balance
 
----
+  More AND lines = higher precision (fewer false positives, but more phrases excluded)
+  Fewer AND lines = higher recall (more phrases fire, but risk of false positives)
+  Wrong order = approved phrases that should fire but silently don't
 
-## STEP 4 — Consolidate Scripts Using Nesting
+═══════════════════════════════════════════════════════════════════════════════
+PART 2 — SYNTAX REFERENCE
+═══════════════════════════════════════════════════════════════════════════════
 
-### CRITICAL — How AND lines work (understand this before merging anything)
+# 2.0 THE GRAMMAR — Tethr Syntax Is Recursive Nested Boolean Logic
 
-A script is evaluated as a WHOLE UNIT against each phrase.
-ALL AND lines must be satisfied by the SAME phrase for the script to fire.
-It is NOT "line 1 hits some phrases and line 2 hits others" — ALL lines together must match ONE phrase.
+Read this first. The rest of Part 2 makes sense only after this section.
 
-CONSEQUENCE: adding an extra AND line to merge two scripts will BREAK any approved phrase
-that does not contain the words on that extra line.
+A Tethr script is not a flat list of operators. It is a NESTED BOOLEAN EXPRESSION,
+where each operator can contain any other operator at any depth. The five operators
+have well-defined meanings and composition rules:
 
-  Script a: training / [great awesome bomb]
-  Covers: "training is great" ✓ / "training is awesome" ✓
-  If you add [I he she]: training / [I he she] / [great awesome bomb]
-  Now "training is great" no longer fires — it has no I/he/she.
-  You broke existing coverage to merge.
+  [ ... ]      OR over alternatives     contains: words, (), ""
+                                        ({} not allowed inside [] — see note below)
+  ( ... )      UNIT — treat as one token contains: words, [], (), "", {}
+                                        Whatever's inside is ONE unit from outside.
+                                        Internal words still count for path-score.
+  { ... }      OPTIONAL (zero-weight)   contains: PLAIN WORDS ONLY — no nesting
+  "..."        LITERAL exact match      contains: PLAIN WORDS ONLY — max ~5 words
+  X:-1         NEGATIVE WEIGHT on X     X can be ANY token: word:-1, "literal":-1,
+                                        [or-group]:-1, (phrase-group):-1
+                                        — :-1 attaches to any subtree, at any depth
 
-SAFE merge = the new AND line contains words that appear in EVERY approved phrase already covered.
-UNSAFE merge = the new AND line contains a word missing from even one approved phrase.
+THE GRAMMAR IS RECURSIVE:
 
-### NEGATION EMBEDDED IN A DETECTION SCRIPT
+  Token  ::=  Word
+            | "Literal"
+            | { Word Word ... }                    <- optional words in order written
+            | [ Token Token Token ... ]            <- OR over tokens
+            | ( Token Token Token ... )            <- sequence/unit of tokens
+            | Token :-1                            <- negation on any token
 
-When a non-relevant phrase is a negated form of a relevant phrase, embed the :-1 guard
-directly inside the detection script at its natural word order position.
-No separate negation script needed.
+  Script ::=  Token (separator Token)*             <- top-level AND over tokens
+  separator ::= whitespace | newline               <- both mean AND at top level
 
-  Relevant: "training is great" / "training is awesome" / "training is the bomb"
-  Non-relevant: "training is not great" / "training isn't awesome"
+KEY CONSEQUENCE: TOP-LEVEL AND is determined by ADJACENCY, not by line breaks.
+Tokens outside any wrapper are AND'd together whether separated by spaces or
+newlines. Newlines are just a readability choice.
 
-  ONE script covers both the detection AND the negation:
-    training
-    [not isn't wasn't]:-1
-    [great awesome bomb cool]
+  [a b] [c d]              <- two top-level [] tokens AND'd, written on one line
+  [a b]
+  [c d]                    <- same script, two top-level [] tokens AND'd, on two lines
 
-  The [not isn't wasn't]:-1 line sits at its natural position — where the negation word appears
-  in speech between "training" and the sentiment word. The script fires on "training is great"
-  (no negation word present) and does NOT fire on "training is not great" (negation suppresses).
+  (do you know) (what your password is)
+                           <- two () tokens AND'd, on one line.
+                              Both must match in the transcript.
 
-  This is always preferred over creating a separate negation-only script when the negation
-  word appears naturally between the same anchor words you are already detecting.
+EXCEPTION: {} (optional bridge) is the ONE token that must stand alone between
+two anchor tokens. {} does not combine adjacently with other tokens on the same
+line — it sits as its own top-level slot. See section 2.5.
 
-### PRE-MERGE CHECK before assigning any script letters
-1. Group phrases by layer structure — same layers in same order = same group
-2. Phrases differing only in topic phrase -> one script, all topic variants as (phrase groups) in []
-3. Single-line (phrase group) scripts -> ALWAYS merge into one []:
-   WRONG: (direct interest) as a / (premium interest) as b / (benefits checking) as c
-   CORRECT: [(direct interest) (premium interest) (benefits checking) (simply free checking)]
+Apart from {}, the formatting choice (one line vs separate lines) is purely
+for readability and does not affect what the script matches.
 
-### Nesting Examples
+EXAMPLES OF VALID NESTING (none of these are exotic — they should be the AI's
+first reach when the phrase set has structure):
 
-SIMPLE — merge parallel topic variants:
-  [(direct interest) (premium interest) (benefits checking) (simply free checking) (tell a friend)]
+  [a b c]                                          — flat OR, simplest case
+  [(a b) (c d)]                                    — OR over two sequenced phrases
+  [(a [b c]) (d [e f])]                            — sequenced phrases each with internal OR
+  [(can [I we] help) (could [I we] assist)]        — two parallel structures, shared inner OR
+  ([please thanks] (could [you we] [check verify])) — outer phrase with two nested ORs
+  [(([can may] I) help) ((could [you we]) assist)] — 3-deep, parallel inversions
+  ("not relevant"):-1                              — negation wrapping a literal
+  [(wrong context):-1 (correct context)]           — OR where one alternative is itself negated
+  (subject [verb1 verb2] [object1 (object two)])   — phrase group with two nested ORs
 
-MEDIUM — shared action, varying topic:
+THE TWO HARD CONSTRAINTS (everything else composes freely):
+
+  {} contains plain words ONLY. No nesting of any kind inside {}.
+       WRONG:    {[a b] of}                        <- [] inside {}
+       WRONG:    {(missing items) some}            <- () inside {}
+       CORRECT:  {of the some}                     <- plain words only
+
+  "" contains plain words ONLY. No nesting. Max 5 words.
+       WRONG:    "[hello hi] there"                <- [] inside ""
+       CORRECT:  "hello there"                      <- plain words only
+
+EVERYTHING ELSE COMPOSES:
+  [] can hold: plain words, (), "". (Not {} — see Rule below.)
+  () can hold: plain words, [], (), "", {}.
+  :-1 can attach to ANY token at ANY depth (word, "", [], (), or nested combinations).
+
+NOTE on {} placement: {} can sit INSIDE a () (as in (missing {of} items)), but
+CANNOT sit inside an []. Inside an [], a {} option would be vacuously satisfied
+and break the OR semantics.
+
+Depth is unlimited.
+
+WHEN TO PUSH DEPTH — the rule is "match the phrase set's actual structure":
+
+  PHRASE SET SHAPE                                  -> STRUCTURE TO USE
+  ──────────────────────────────────────────────────────────────────────
+  Single anchor varies (one slot, many synonyms)    -> flat [a b c d]
+  Two slots vary independently                       -> two lines, each [a b]
+  Two slots vary but only specific COMBINATIONS     -> [(a x) (b y)] — pairs locked
+  Inversion (same words different order)             -> [(a b c) (c b a)]
+  Subject + verb both vary, only valid combos       -> [([s1 s2] v1) ([s3] v2)]
+  False positive uses similar words                  -> embed (wrong-phrase):-1 inline
+  Negation context shares structure with relevant   -> [(relevant) ("wrong context"):-1]
+
+The flat [a b c] is the simplest case of the general grammar — useful when each
+synonym is independent. As soon as the phrase set has LOCKED COMBINATIONS,
+ORDER-DEPENDENT VARIATION, or PARALLEL STRUCTURES with shared inner slots,
+go deeper. Nesting is the primary tool; flat structures are the simplest case
+of it. Match the script structure to the phrase set's actual structure.
+
+INDENTATION FOR READABILITY (optional, doesn't change semantics):
+For deeply nested lines, break across visual lines if it aids understanding —
+but the final JSON must keep each script line as a single string. Use deep
+nesting whenever the phrase set demands it. Don't simplify away precision.
+
+
+# 2.1 Plain keyword and multi-word AND line
+Matches the word(s) anywhere in the transcript, case-insensitive. Each line is an
+AND condition (must match somewhere in the phrase, in order with other lines).
+
+  Single keyword:
+    credit
+    deposit
+    who
+
+  Multi-word AND line — words separated by spaces on a single line:
+    automatic deposit          <- matches "automatic deposit" as a sequence
+    new membership             <- matches "new membership" as a sequence
+    direct deposit             <- matches "direct deposit" as a sequence
+
+  IMPORTANT — what space-separated plain words on one line mean:
+  Two plain words side by side at the top level form an ADJACENT-WORD sequence
+  (equivalent to wrapping them in a (phrase group)). They must appear IN ORDER
+  in the transcript with at most a small gap between them (subject to path
+  scoring).
+
+  This is the SAME semantics as putting them on separate lines with no other
+  tokens between them — both are AND conditions:
+    automatic deposit          <- one AND token, sequence
+    automatic / deposit        <- two AND tokens, same final result via gate-and-score
+
+  Use the one-line form when the two words are tightly coupled in speech
+  ("automatic deposit" as a known compound). Use separate lines when each
+  word is its own anchor.
+
+A multi-word AND line is structurally equivalent to a (phrase group):
+    automatic deposit          <- same meaning as (automatic deposit)
+    direct deposit             <- same meaning as (direct deposit)
+
+The unparenthesised form is preferred for readability when the sequence stands
+alone as its own AND line. Use () only when you need to:
+  - Wrap the sequence as one option inside an [OR group]: [employer (company work)]
+  - Attach :-1 to the sequence: (cooled down outside):-1
+  - Disambiguate nested structure
+
+Prefer plain multi-word AND lines wherever they read naturally. Don't wrap
+"automatic deposit" in () unless you need it inside an [] or to attach :-1.
+
+
+# 2.2 [OR group]
+Any single item inside [] satisfies that line. Items can be plain words, "exact
+phrases", or (phrase groups).
+
+Three usages:
+  1. On its own line as an AND condition:
+     [raise start get put]   <- call must contain one of these
+  2. Nested inside (phrase group) for OR variation in a sequence:
+     (how [may can what] I [help assist])
+  3. With :-1 for negation:
+     [won't unable cannot]:-1
+
+NO MAXIMUM SIZE: a 10 or 20-item [OR group] is fine. The only constraint is that
+every word must come from the approved phrases — never invent.
+
+[] must contain genuine anchor words — not articles, not filler, not connectors:
+  WRONG:   [a the your]      <- articles, no signal
+  WRONG:   [of them]         <- filler connector
+  CORRECT: [raise start escalate boost]   <- meaningful action verbs
+
+
+# 2.3 (phrase group) — The UNIT Operator
+
+The most important thing about () is what it DOES:
+
+  () turns whatever it contains into a SINGLE UNIT.
+
+Whatever sits inside the () — words, [OR groups], (), "", :-1, or any nested
+combination — collapses to one token at the script's structural level. From the
+AND-gate's perspective and from an outer []'s perspective, the entire () is one
+indivisible thing.
+
+This is the unitization rule:
+  (gift card)             — one unit: the literal phrase "gift card"
+  (gift [card cards])     — one unit: "gift card" OR "gift cards" — still ONE unit
+  ([the my] credit)       — one unit: "the credit" OR "my credit"
+  ([raise increase] credit) — one unit: "raise credit" OR "increase credit"
+  ([please can] [you we] help) — one unit, with two internal ORs
+  (([can may] I) help)    — one unit, with a nested () inside
+  ("not relevant"):-1     — one unit, treated as a negative weight
+
+ANYTHING that should behave as a single word in the script structure goes inside
+(). The internal complexity doesn't matter — outside, it's one token.
+
+SCORING — () IS SCORE-TRANSPARENT:
+  () unitizes the STRUCTURE (gate, order, OR-membership), not the SCORE.
+  The internal words still count individually toward the path-score numerator.
+
+  (gift cards) matching "gift cards" → 2 numerator units (one per internal word)
+  (gift [card cards]) matching "gift cards" → 2 numerator units
+  (gift [card cards]) matching "gift card" → 2 numerator units
+
+  So () is "treat as one word for structural purposes, but score it normally."
+  No score penalty for unitizing. Use () freely whenever you need unit behaviour.
+
+FOUR USAGES (all are common):
+
+  1. AS ONE OPTION INSIDE AN [OR group]:
+       [(over the phone) (when you call) direct]
+     The two ()'s and "direct" are three alternatives. The ()'s are unitized so
+     [] sees them as single options, not as a flat soup of words.
+
+  2. AS A STANDALONE AND LINE:
+       (Don't tell compliance)
+       (let me check)
+       ([please can] [you we] help)
+     Used when the unit IS the whole AND-line slot. Often deeply nested.
+
+  3. WITH :-1 AS A NEGATION UNIT:
+       (Don't tell compliance):-1
+       ([non not isn't wasn't] (clear by)):-1
+     The negation applies to the entire unit as one thing.
+
+  4. AS PART OF A LARGER NESTED EXPRESSION:
+       [(can [I we] [help assist] you) (could [you we] [help assist])]
+     Each () is one alternative in the outer []. Internal complexity is fine.
+
+WHY USE () AT ALL?
+
+When the structural variation must be LOCKED to a specific sequence, ()
+unitizes the lock. Without (), [OR groups] would fire on any combination of
+their internal words across AND lines — even combinations that no real phrase
+uses. Wrapping the locked sequence in () prevents that.
+
+  WITHOUT () — fires on wrong combinations:
+    [the my a]                <- any of these
+    [credit account balance]  <- any of these
+    Fires on real phrases AND on accidental cross-products like "the balance"
+    when only "the credit" and "my balance" appear in the approved phrases.
+
+  WITH () — only valid pairings fire:
+    [(the credit) (my account) (the balance)]
+    Each pairing is locked as one unit. No cross-product false positives.
+
+NO MAXIMUM NESTING DEPTH. Nest as many levels deep as the approved phrases require.
+Multiple ()'s inside a () is fine. ()'s inside []'s inside ()'s is fine.
+
+
+# 2.4 "exact phrase"
+Fixed word sequence — maximum 5 words. Inside [] or () or standalone.
+
+USE FREELY when the phrase set contains DISTINCTIVE VERBATIM CHUNKS — exact
+multi-word sequences that appear in the approved phrases as-is. "" literals are
+a normal, everyday anchor, not a last-resort tool.
+
+GOOD USES FOR "":
+  - Distinctive verbatim chunks from approved phrases:
+      "from Walmart", "Do you get is it", "one of those", "It's not", "random account"
+    When a phrase has a 2-4 word chunk that's distinctive and unlikely to vary,
+    "" locks it precisely without needing to enumerate alternatives.
+  - Fixed terms: "terms and conditions", "thank you for calling"
+  - Brand names, product names, legal phrases
+  - Inside [] as one alternative: ["It's not" question trying]
+  - Inside () as a slot piece: (cash {or} "gift cards")
+  - With :-1 for surgical FP suppression: "anytime you do make":-1
+
+WHEN NOT TO USE "":
+  Use (phrase group) with internal [] when the slot has REAL variation that "" can't
+  capture:
+    WRONG:   "may I have your password"    <- only catches this exact 5 words
+    BETTER:  ([may can] I [have get] your password)   <- catches all variants
+
+THE RULE:
+  - Verbatim chunk that appears in phrases distinctively -> "" literal
+  - Slot with multiple alternatives -> [] or ()
+  - Slot with optional connectors -> {} between anchors or inside ()
+  Pick the shape that matches the SHAPE OF THE PHRASE, not a default.
+
+
+# 2.5 {optional words} — Bridges
+
+INDIVIDUAL PLAIN WORDS ONLY, IN LEFT-TO-RIGHT ORDER.
+  - Each entry inside {} is a single word — not a phrase, not a sequence
+  - The words inside {} are OPTIONAL: zero, some, or all of them may hit in
+    the transcript, and the {} contributes neutrally either way
+  - BUT whichever words DO appear must appear in the ORDER WRITTEN.
+  - {to quickly gonna} = up to three words, each optional, that — if any appear
+    in the transcript between the surrounding anchors — must appear in this order:
+    "to" before "quickly" before "gonna". A transcript with "gonna quickly to"
+    in the gap does NOT hit this {} in that order; only "gonna" alone (or
+    "to gonna", or "quickly gonna", etc.) hits.
+  - {of them} = the word "of" optionally followed by the word "them". Like every
+    other operator in Tethr, order is preserved.
+  - No [], (), or "" inside {} — ever
+
+NEUTRAL-WEIGHT: not required to fire but boost the path score when present in
+the written order.
+
+WHEN TO ADD {} — TWO TRIGGERS:
+
+  TRIGGER A — Gap of 4 OR MORE non-article words between anchors:
+    "going to gonna raise the credit" — gap between [going] and [raise] is 2 non-article
+    words ("to gonna"), so {} is optional but useful.
+    "I would just like to quickly confirm the missing items" — gap between [I] and
+    [confirm] is 5+ non-article words → {} bridge needed for path score density.
+
+  TRIGGER B — Optional non-article connector inside a (phrase group):
+    (cash {or} "gift cards")    <- "or" optionally appears as spoken connector
+    (clear {it} balance)        <- "it" optionally appears
+
+ARTICLES NEVER TRIGGER {}: "a", "an", "the", "your", "my" do NOT count toward the
+gap and never get bridged with {}. Path-scoring tolerates them naturally.
+
+  WRONG:   [raise start] / {a the your} / credit         <- articles, never use {}
+  CORRECT: [raise start] / credit                         <- adjacent, articles drop
+
+NO DUPLICATES — every word inside {} must be checked against the line IMMEDIATELY
+BEFORE the {} line and the line IMMEDIATELY AFTER the {} line. If any word in {}
+appears in either neighbour at any nesting depth, REMOVE that word from {}.
+
+Check both directions, every time. A {} that's clean against the line above but
+duplicates a word in the line below still breaks. Walk before-and-after as one audit.
+
+  Check against ALL token types on the neighbouring lines:
+  - Words inside adjacent [OR groups]
+  - Words inside adjacent (phrase groups)
+  - Words inside adjacent "exact phrases"
+  - Adjacent plain keywords
+  - Words NESTED inside adjacent () or [] at ANY depth — recurse all levels
+
+  WRONG — "the" inside {} also inside the line AFTER it:
+    [raise]
+    {a the}
+    (the credit)             <- "the" already nested inside the next line's ()
+  CORRECT — drop the duplicate (and the article, per the rule above):
+    [raise]
+    (credit)
+
+  WRONG — "items" inside {} duplicates words in both before AND after lines:
+    [confirm confirming]
+    {the items}              <- "items" appears in the line after this one
+    [(missing items) (items missing)]
+  CORRECT:
+    [confirm confirming]
+    [(missing items) (items missing)]
+
+  WRONG — "from you" inside {} duplicates words in the line BEFORE it:
+    [(haven't heard from you) (I haven't)]
+    {from you for a while}   <- "from" and "you" already in (haven't heard from you)
+    [reach out]
+  CORRECT — strip the duplicates, keep only what's not already in either neighbour:
+    [(haven't heard from you) (I haven't)]
+    {for a while}            <- duplicate words removed
+    [reach out]
+
+REAL FAILURE: in production testing, scripts with duplicate words inside {} have
+dropped phrase scores from .97 to .89 — pushing them below threshold. This is the
+single most common cause of an otherwise-correct script failing. Walk every {}
+against its before-line AND its after-line before output.
+
+WHERE {} CAN AND CANNOT GO:
+
+  VALID — standalone on its own line, BETWEEN two anchor lines:
+    [confirm confirming]
+    {to quickly}
+    [item items]
+
+  VALID — inside a (phrase group) as an optional slot:
+    (cash {or} "gift cards")
+    (clear {the} balance)
+    (gift {cards} "and")
+
+  INVALID — inside an [OR group]:
+    [{two three} of them]    <- {} inside [] is wrong
+    [gift {cards} voucher]   <- {} inside [] is wrong
+
+  INVALID — as the FIRST line of a script:
+    {would just}                       <- {} cannot start a script
+    [confirm confirming]
+    [item items]
+    {} is a BRIDGE — by definition it bridges between two anchors. With nothing
+    before it, there is nothing to bridge from. The script becomes anchorless
+    on the left side.
+
+  INVALID — as the LAST line of a script:
+    [confirm confirming]
+    [item items]
+    {today now}                        <- {} cannot end a script
+    Same reason: no anchor to bridge to on the right side.
+
+THE RULE: every {} line MUST sit between two anchor lines (plain keyword,
+[OR group], (phrase group), or "exact phrase"). If you find yourself wanting
+to put {} at the start or end of a script, either:
+  - Promote those words to a real anchor line ([OR group] or plain keyword), OR
+  - Drop them entirely — they aren't load-bearing as bridges if there's no
+    second side to bridge to.
+
+
+# 2.6 :-1 negative weight
+Suppresses the score of the line it sits on (NOT the whole script).
+Works on any token: keyword:-1 / "phrase":-1 / [list]:-1 / (group):-1
+
+For full negation: put :-1 on every AND line of the negation, OR compress into one
+(phrase group):-1.
+
+
+# 2.7 Articles — Strip Unless Load-Bearing
+
+CRITICAL: Articles ("a", "an", "the", "your", "my") should NOT be in scripts by
+default. They appear in nearly every spoken phrase but don't identify the category.
+
+KEEP articles ONLY when:
+  - Inside an "exact phrase" where they are part of a fixed term: "the bees knees"
+  - Inside a (phrase group) where removing them changes meaning: (the only one)
+    Without "the" this becomes "only one" which fires on "only one option", "only one minute"
+  - When the article distinguishes one approved phrase from another approved phrase
+
+STRIP articles when:
+  - Inside (phrase groups) where concept words alone identify it: prefer (credit limit) over (the credit limit)
+  - As {} bridges between adjacent anchors: just remove the {} entirely
+  - As [OR group] options when they're just determiner variants of one concept
+
+THE TEST: "If I remove this article, would the script still clearly identify the right calls?"
+  YES -> strip it
+  NO  -> keep it
+
+  WRONG (article noise):
+    [(the credit limit) (a credit limit) (your credit limit)]   <- determiner variants
+    [confirm confirming] / {a the your} / [item items]          <- noise between anchors
+    [I he she we] / {a the your} / [raise start]                <- noise between anchors
+
+  CORRECT (clean):
+    [(credit limit)]                          <- determiners stripped, concept preserved
+    [confirm confirming] / [item items]
+    [I he she we] / [raise start]
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 3 — HOW TO BUILD A SCRIPT
+═══════════════════════════════════════════════════════════════════════════════
+
+# THE PROCESS AT A GLANCE — Reference Card
+
+Before any details, here is the full workflow as a single ordered process.
+The rest of Part 3 elaborates each step.
+
+  PHASE 1 — UNDERSTAND THE INPUT
+    Read category definition, all approved phrases, all non-relevant phrases,
+    any screenshots. Note the threshold (default .95).
+
+  PHASE 2 — INTENT GROUPING (do this FIRST, before building any script)
+    Group approved phrases by shared SHAPE — not just by topic noun and not by
+    surface words. Two phrases share a SHAPE when they have the same number of
+    slots in the same order, with each slot fillable by a different word/phrase.
+
+    Phrases sharing a shape MERGE into ONE script (their distinct slot fillers
+    become [OR] alternatives at the relevant slot, with the topic anchor shared).
+
+    Example of shape-sharing — these three phrases share the shape
+    "[context-word] [qualifier-word] gift cards":
+      "I'm trying to BUY some gift cards"            -> [trying] [buy] (gift cards)
+      "I have a QUESTION REGARDING the gift card"   -> [question] [regarding] (gift card)
+      "It's not it's ONE OF THOSE gift cards"        -> ["It's not"] ["one of those"] (gift cards)
+    These three MERGE into ONE script:
+      [trying question "It's not"]
+      [buy regarding "one of those"]
+      (gift [cards card])
+
+    Example of DIFFERENT shapes — these need different scripts:
+      "Do you get is it any more beneficial to get cash or gift cards"
+        -> shape: "[opener-literal] [comparative-word] (cash-or-giftcards)"
+      "my computer was hacked, purchase made for dollars worth of gift cards"
+        -> shape: "[event-word] [action] [dollar-quantifier-giftcards]"
+    Different shapes -> different scripts.
+
+    DEFAULT TO MERGING. Before creating a separate script, ask: "does this phrase
+    share a shape with any phrase already in a group?" If YES -> add to that group.
+    Only create a new group when NO existing group has a compatible shape.
+
+    DYNAMIC SCRIPT COUNT — NO FIXED TARGET:
+    The number of scripts emerges from the phrase set, it is NOT a fixed ratio.
+    Each script is built to cover as MANY phrases as possible. A new script is
+    only created when the next phrase genuinely CANNOT be absorbed into any
+    existing script — that is, when ALL of B1-B5 return no for every existing
+    script (no exact fit, can't add an OR alternative, can't widen an OR group,
+    can't add a {} bridge to share the same anchors, no inversion match).
+
+    The decision per phrase: try to merge into every existing script in order
+    using B1-B5. Create a new script ONLY when every absorption attempt fails.
+
+    BUILD THE DOMINANT SCRIPT FIRST.
+    Most categories have one BIG script that catches most phrases plus 1-5
+    smaller satellite scripts for edge cases. Don't try to keep all scripts
+    equal — let one absorb as many phrases as it can by widening its [OR]
+    slots aggressively. Real expert [OR] slots routinely hold 8-15 alternatives
+    mixing plain words, () units, and "" literals. See TYPICAL SCRIPT SET
+    SHAPE (Shapes 1 and 2) for full examples.
+
+    This means: a phrase set of 8 phrases might produce 2 scripts (if 4 phrases
+    each share a shape) or 7 scripts (if phrases mostly have unique shapes).
+    Both are correct outcomes — what matters is that each script is doing the
+    maximum work it can, not hitting any pre-set count.
+
+  PHASE 3 — BUILD EACH SCRIPT (run master algorithm A-E per intent group)
+    A. Analyse the phrase
+    B. Can an existing script absorb it? (B1 exact / B2 widen [] alt /
+       B3 widen [] / B4 add {} bridge / B5 inversion handling)
+    C. Build a new script using SLOTS — each slot becomes one top-level AND token,
+       with () units to lock combinations and [] for genuine alternatives
+    D. Gap walk every targeted phrase, add {} bridges for any 4+ word gaps.
+       FOR LONG PHRASES (12+ content words): apply LONG-PHRASE STRATEGIES L1-L5
+       inside Section D — shrink span, multi-bridge densify, use "" literals,
+       split by sub-intent, or mark pending if irreducible.
+    E. Pre-flight (CHECK 1-5: no duplicates, removal test, gap walk, {} position,
+       cross-token anchor redundancy)
+
+  PHASE 4 — CONSOLIDATE (F: cross-script merge)
+    For every pair of scripts, check if they can union into one without breaking
+    coverage (same line count + position-compatible + negation-compatible).
+
+  PHASE 5 — PRODUCTION VERIFICATION (G: before emitting JSON)
+    G1. Build coverage verification TABLE — one row per approved phrase showing
+        best script + gap-walked estimated score + verified yes/no
+    G2. STRICT RULE: scriptLetter is ONLY emitted for phrases with Verified=YES.
+        All others get status="pending". No assigning letters based on intent
+        without verifying the score clears threshold.
+    G3. Delete orphan scripts: any script not the "Best script" for at least one
+        Verified=YES phrase gets removed from output.
+    G4. False-positive scan: imagine almost-matches, verify they don't fire.
+    G5. Honest precision/recall from the verification table.
+    G6. Emit JSON.
+
+  PRINCIPLE THAT GOVERNS ALL PHASES:
+    Match the script's structure to THIS phrase set's actual structure. Don't
+    copy the shape of an example script from another category. Lock combinations
+    with () units. OR alternatives with []. Bridge optional gaps with {}. Negate
+    false positives with :-1 at natural position. Nest as deeply as the intent
+    requires. Production scale (10,000+ calls) means tightness beats broadness
+    — when uncertain, choose tighter.
+
+  DOMAIN-NEUTRAL CONSTRUCTION:
+    Every example in this prompt is an ILLUSTRATION of a mechanic, not a TEMPLATE.
+    Derive structure from the phrases you're given. A topic-mention category
+    might need a 1-line script. A speech-act category might need 5 slots. A
+    multi-sub-intent category might need 3 scripts. Always read THIS phrase set.
+
+
+# CANONICAL PATTERN — Intent-Locked Structure
+
+A good script\'s structure mirrors the intent\'s structure. The principles below
+are DOMAIN-INDEPENDENT — they apply to any category, whether the phrases are
+about banking, healthcare, support tickets, sales objections, or anything else.
+
+CORE PRINCIPLES:
+
+  1. SLOTS = AND TOKENS
+     A speech-act intent typically has 2-5 SLOTS (action, frame, qualifier, topic, etc).
+     Each slot becomes one top-level AND token in the script.
+
+  2. LOCK COMBINATIONS WITH () UNITS
+     When the phrase set has SPECIFIC combinations of words at a slot
+     (e.g. "modal X verb" only in certain pairings), wrap them in () to
+     prevent cross-product false positives. The () keeps the combination
+     intact while still allowing the internal words to vary via nested [].
+
+  3. ALTERNATIVES GO IN []
+     When a slot has multiple distinct ways to be expressed, wrap them in
+     an outer [] with each alternative as an item inside. Alternatives can
+     be plain words, "literals", () units, or nested combinations.
+
+  4. BRIDGES WITH {}
+     Optional filler words between slots go in {} bridges (between two
+     anchor tokens, never at start or end).
+
+  5. NEGATE FALSE POSITIVES AT NATURAL POSITION
+     :-1 sits where the bad word would naturally be spoken in the transcript.
+     See Part 5 Rule A for the two cases.
+
+
+ILLUSTRATION (one concrete example showing what the principles look like together):
+
+  Intent: agent asking for an identifier (verbal password is one instance; the
+  same shape applies to "agent asking for account number," "agent asking for
+  date of birth," etc).
+
+  Phrase set excerpt:
+    "may I get your identifier or verbal password?"
+    "And how about your verbal password?"
+    "do you recall your verbal password?"
+    "What is your secret identifier?"
+
+  Resulting script (5 slots, each as one top-level AND token):
+
+    SLOT 1: speech-act
+      [Provide ([can may] I [have get]) confirm ask verify what what\'s]
+
+    SLOT 2: asking-frame
+      [([do can could] you [remember have tell provide]) (do you know) recall "and your"]
+
+    SLOT 3: optional bridge
+      {is your phone number}
+
+    SLOT 4: qualifier
+      [verbal secret challenge (challenge word)]
+
+    SLOT 5: noun
+      [(verbal [password passport]) password identifier]
+
+  Why each piece earns its place:
+    - Slot 1\'s ([can may] I [have get]) is a () unit because the phrase set has
+      "can/may I have/get" as a LOCKED matrix — without the (), a flat
+      [can may] / I / [have get] would fire on cross-products that didn\'t appear.
+    - Slot 4\'s (challenge word) is a () unit because it\'s a two-word concept,
+      not two separate alternatives.
+    - Slot 5\'s (verbal [password passport]) locks "verbal" as a prefix when
+      paired with password/passport, while bare "password" and "identifier" are
+      separate alternatives.
+
+  THIS IS ONE EXAMPLE OF THE PRINCIPLES. Do NOT pattern-match new categories
+  onto this exact 5-slot shape. A simpler intent has fewer slots; a complex
+  intent has more. Match structure to the phrase set you\'re given, not to
+  this example.
+
+
+HOW TO USE THE PRINCIPLES ON ANY CATEGORY:
+
+  Step 1: Read the phrases. What\'s the underlying SPEECH-ACT or TOPIC FOCUS?
+  Step 2: List the SLOTS the phrases share (what aspects vary across them).
+  Step 3: For each slot, list every variant seen across phrases.
+  Step 4: For each slot, choose the shape:
+            - Variants are independent single words -> flat [a b c]
+            - Variants are locked combinations     -> [(combo1) (combo2)] with internal []
+            - Variants share a sub-structure       -> nested [] inside ()
+            - Optional connectors                  -> {} bridge between slots
+  Step 5: Assemble as top-level AND tokens. One slot, one token.
+  Step 6: Run the pre-flight CHECKs (see master algorithm Section E).
+
+
+WHAT TO AVOID (DOMAIN-NEUTRAL FAILURE MODES):
+
+  - Under-structured (too broad): only the topic noun as the anchor, missing the
+    speech-act. Fires on any mention of the topic. FALSE POSITIVES AT SCALE.
+
+  - Cross-product (flat where lock needed): two slots with flat [] when only
+    specific combinations appear in the phrases. Fires on combinations no real
+    phrase contains.
+
+  - Over-fragmented: one separate script per phrase variant. Should be one
+    script per SUB-INTENT, with internal nesting capturing the variants.
+
+  - Domain-imitation: copying the shape of an example script onto a category
+    that has a different shape. Always derive structure from THIS phrase set.
+
+# TYPICAL SCRIPT SET SHAPE — What Production Script Sets Actually Look Like
+
+Empirical observation from real expert-written scripts: most production script
+sets follow a specific shape that the AI tends to under-produce. Internalise
+these patterns before running the master algorithm.
+
+
+## SHAPE 1 — DOMINANT SCRIPT + SATELLITE SCRIPTS
+
+Most categories produce ONE big "dominant" script that catches the majority of
+phrases (often 50-80% of approved phrases), plus 1-5 smaller "satellite" scripts
+that catch the edge cases the dominant script can\'t absorb.
+
+  Example category: Verbal Password (15+ approved phrases, 5 scripts total)
+
+    Script a (DOMINANT — catches ~15 phrases):
+      [Provide ([can may] I [have get]) confirm confirmed ask verify what what\'s
+       ([do can could] you [remember have tell provide]) (do you know) recall "and your"]
+      {is your phone number}
+      [verbal secret challenge (challenge word)]
+      [(verbal [password passport]) password identifier]
+
+    Script b (SATELLITE — catches ~10 phrases):
+      [(verbal [password passport]) (secret identifier) (security word)]
+      {you give us on these calls you provide}
+      [recall authenticate verify ([can do] you [know have provide give remember tell])
+       (over the phone) (may I have)]
+
+    Script c, d (SATELLITE — small variants):
+      shorter scripts each handling 2-5 distinctive phrasings
+
+    Script e (LITERAL — 1 phrase):
+      "a secret id"
+
+When building a script set:
+  - Start by trying to build the DOMINANT script. Stuff as many phrases as
+    possible into one script by widening its [OR] slots aggressively.
+  - When a phrase genuinely won\'t fit the dominant script (B1-B5 all fail
+    against it), build a satellite script for it.
+  - Don\'t try to keep all scripts equally sized. ONE big script + several
+    smaller ones is the expected shape, not 5 equal scripts.
+
+EXCEPTION: when phrase set has multiple genuinely distinct sub-intents with
+roughly equal phrase counts, the script set may have several equally-sized
+scripts (e.g. gift cards example with 6 scripts each covering 1-3 phrases).
+That\'s also valid. The point is: structure tracks the phrase set, not a
+preference for balance.
+
+
+## SHAPE 2 — MEGA-MERGED [OR] SLOTS WITH 8-15 ALTERNATIVES
+
+Real expert scripts routinely put 8-15 alternatives into a single [OR] slot.
+The AI tends to stop at 3-5 alternatives and create new scripts instead.
+This is wrong. WIDEN the slot first.
+
+  Example slot from real Verbal Password Script a (slot 1):
+
+    [Provide
+     ([can may] I [have get])
+     confirm
+     confirmed
+     ask
+     verify
+     what
+     what\'s
+     ([do can could] you [remember have tell provide])
+     (do you know)
+     recall
+     "and your"]
+
+  This single [OR] slot contains 12 alternatives mixing four token types:
+    - 7 plain words (Provide, confirm, confirmed, ask, verify, what, what\'s)
+    - 3 () units with internal [] (the modal-verb combinations)
+    - 1 () plain sequence (do you know)
+    - 1 "" literal (and your)
+
+  Each alternative came from a different approved phrase. Instead of creating
+  12 separate scripts, the expert stuffed all 12 into one slot and shares
+  the rest of the script structure across all phrases.
+
+  Example slot from real Visa Letter Script a (slot 1):
+
+    [about regarding need question confirm help assistance support waiting
+     reply request receiving look forward offering provide send sent apply
+     start registration response confirmation]
+
+  20+ plain alternatives in one [OR] slot. Each one came from a different
+  phrase. ALL share the slot 2 structure (visa-letter topic with its own
+  internal [OR]s and () units).
+
+WHEN TO WIDEN A SLOT vs CREATE A NEW SCRIPT:
+  - The new phrase\'s context-word fits as another alternative at the SAME slot
+    position as an existing script\'s [OR] slot -> WIDEN that [OR] slot
+  - The new phrase has a different SLOT STRUCTURE (different number of slots,
+    different order, different topic anchor) -> NEW SCRIPT
+
+  Default to widening. The AI under-widens and over-creates new scripts.
+
+
+## SHAPE 3 — STRUCTURE: VERB/CONTEXT SLOT → QUALIFIER SLOT → TOPIC SLOT
+
+Most expert scripts follow a 2-5 slot pattern in this order:
+
+  SLOT 1: SPEECH-ACT / VERB / CONTEXT — usually the widest [OR] (8-15 alts)
+  SLOT 2: OPTIONAL CONNECTOR/BRIDGE — sometimes a {} bridge, sometimes skipped
+  SLOT 3: QUALIFIER — narrower [OR] (3-5 alts, often () units)
+  SLOT 4: TOPIC NOUN — narrowest [OR] (2-4 alts, often a single () unit)
+
+  Verbal Password Script a:
+    SLOT 1 (verb/context):    [Provide ([can may] I [have get]) confirm ... "and your"]
+    SLOT 2 (optional bridge): {is your phone number}
+    SLOT 3 (qualifier):       [verbal secret challenge (challenge word)]
+    SLOT 4 (topic noun):      [(verbal [password passport]) password identifier]
+
+  Item Check Script a:
+    SLOT 1 (anchor verb):     what
+    SLOT 2 (optional bridge): {was that you did is that}
+    SLOT 3 (optional bridge): {item product}
+    SLOT 4 (verb/context):    [you you\'re wanted want wanna going "is that" "was it" wanna only]
+    SLOT 5 (action):          [add include report missing "add on" "add on there"]
+
+  Top Priority Script a:
+    SLOT 1 (verb):            [escalating take Make]
+    SLOT 2 (referent):        [this it]
+    SLOT 3 (optional bridge): {our full attention}
+    SLOT 4 (intensifier):     [on as highest Top]
+    SLOT 5 (topic noun):      priority
+
+  Training Sentiment Script a:
+    SLOT 1 (topic):           training
+    SLOT 2 (sentiment):       [great awesome bomb]
+    SLOT 3 (negation guard):  (not great):-1
+
+This isn\'t a rigid template — different categories use different slot patterns.
+But the GRADIENT (widest at slot 1, narrowest at the topic noun) is consistent.
+The wide slot is where merging happens.
+
+
+## SHAPE 4 — TOPIC ANCHOR IS USUALLY SIMPLE AND SHARED
+
+Across scripts in the same category, the TOPIC NOUN slot is typically the
+simplest and most stable. Examples from real categories:
+
+  Gift cards category:    (gift [cards card])   <- appears in 5 of 6 scripts
+  Password category:      [(verbal [password passport]) password identifier]
+                                                <- appears across scripts a, c, d
+  Item category:          [item product]        <- appears across scripts a, b
+  Top Priority category:  priority              <- single plain word
+  Training category:      training              <- single plain word
+  Visa Letter:            (visa letter) and variants
+
+When building scripts in a category, identify the topic anchor early and
+reuse it across scripts. CHECK 5 explicitly permits this — reusing the
+topic noun ACROSS scripts is good and expected (just not WITHIN one script
+in two different top-level tokens).
+
+
+# MASTER ALGORITHM — ONE CONSISTENT PROCEDURE FOR EVERY PHRASE
+
+This is the single decision procedure to follow for EVERY approved phrase.
+Sections A through G below are self-contained — read and follow them in order.
+Merging, nesting, bracket selection, and gap-bridging happen as one coherent pass.
+
+INTENT GROUPING (do this FIRST, before processing any individual phrase):
+
+  Read the entire phrase set. Group phrases by SHARED INTENT, not by surface words.
+  Two phrases share an intent when they express the same speech-act with different
+  wording. Different intents need different scripts. Same intent collapses into
+  ONE rich nested script.
+
+  Examples of different intents in the same category:
+    Agent asking for password               -> Script a
+    Agent confirming password exists        -> Script b
+    Agent describing what the password is   -> Script c
+    Agent asking with a specific surface form -> Script d
+
+  Examples of the SAME intent (these collapse into one script):
+    \"can I have your password\"
+    \"may I get your secret identifier\"
+    \"could you tell me your verbal password\"
+    \"do you remember your password\"
+    All four are agent-asking-for-password. ONE script with parallel UNITS,
+    not four separate scripts.
+
+  Output: a mapping from each phrase to ONE intent group. Each intent group will
+  produce ONE script.
+
+For EACH intent group (not each phrase), run A through E to build that group's
+script. After ALL intent groups have been processed, run F once to check if any
+two scripts can themselves be merged. Finally, run G as the production guard
+before emitting JSON.
+
+For EACH approved phrase WITHIN an intent group, IN ORDER, run A through E.
+After ALL approved phrases have been processed:
+  - Run F once on the final script set (cross-script merge consolidation)
+  - Run G once on the final script set (coverage + FP verification before output)
+
+  A. ANALYSE THE PHRASE
+     1. Break it into positional LAYERS by reading the phrase in order: subject
+        (who is acting), intent (what kind of speech-act), negation (any), action
+        (the verb), bridge (filler), topic (the noun). Only use the layers that
+        actually appear in this phrase set.
+     2. Identify which words are the 2-3 most distinctive ANCHOR words.
+     3. Note any (multi-word concepts) — these will become () phrase groups.
+     4. Note any common variants you can already see — these will inform [] OR groups.
+
+  B. CAN AN EXISTING SCRIPT ABSORB THIS PHRASE?
+     Walk through the existing scripts in order. For each one ask:
+
+     ⚠ AGGRESSIVE MERGING IS THE DEFAULT.
+     Real expert scripts put 8-15 alternatives into a single [OR] slot. If you
+     reach for a new script before the existing [OR] slot has 8+ alternatives,
+     you are probably under-widening. See TYPICAL SCRIPT SET SHAPE / SHAPE 2.
+     Try every B step honestly against every existing script before creating
+     a new script.
+
+     B1. EXACT FIT — does the phrase already satisfy every AND line of this script
+         in left-to-right order without any changes?
+         YES -> assign this script's letter. DONE for this phrase.
+         NO  -> continue.
+
+     B2. ADD AN OR ALTERNATIVE — can this phrase fit by adding a new alternative to an
+         existing [OR group]? The alternative can be a plain word, a (), a "", or even
+         a NESTED structure with its own internal [] or () — any well-formed token.
+         Example: existing [(missing items) (items there)] + new phrase \"missing one\"
+                  -> [(missing items) (items there) (missing one)]
+         Example: existing [(can [I we] help)] + new phrase \"could you assist\"
+                  -> [(can [I we] help) (could [you we] assist)]   <- new () with its own [] inside
+         YES -> add the alternative, assign letter. DONE for this phrase.
+         NO  -> continue.
+
+     B3. WIDEN AN OR GROUP — can a token at any nesting depth in an existing line be
+         widened to include this phrase's variation? The widening can happen at the
+         OUTER [] or at any NESTED [] inside a () inside a [].
+         Example: existing [raise start] + new phrase uses \"escalate\"
+                  -> [raise start escalate]
+         Example: existing [(can [I we] help)] + new phrase has \"may I help\"
+                  -> [(can [I we] help) (may I help)]               <- outer [] widened
+                  OR widen inner: [([can may] [I we] help)]         <- depending on phrase set
+         (THERE IS NO MAXIMUM OR GROUP SIZE OR NESTING DEPTH. Widening is preferred
+         over splitting. Reach into nested structures to widen at the right slot.)
+         YES -> widen, assign letter. DONE for this phrase.
+         NO  -> continue.
+
+     B4. ADD A {} BRIDGE — does the phrase share the same anchors but have a
+         wider non-article gap between two existing AND lines?
+         Gap ≤ 3 non-article words: no bridge needed, phrase already fits.
+         Gap ≥ 4 non-article words: add a {} bridge between those lines.
+         Articles (a/an/the/your/my) never count toward the gap.
+         YES -> add {} bridge, assign letter. DONE for this phrase.
+         NO  -> continue.
+
+     B5. WORD ORDER INVERSION — same core words but flipped left-to-right order?
+         If the inversion is INTERNAL to one slot (e.g. \"missing items\" vs
+         \"items missing\"), it's not an inversion — merge as alternatives:
+             [(missing items) (items missing)]
+         If the inversion is a GENUINE flip of the whole AND-line sequence:
+             Script a: training / [great awesome]
+             Script b: [great awesome] / training
+         These must be SEPARATE scripts. Create a new script for the flipped order.
+         YES (genuine flip) -> new script (proceed to C).
+         NO (internal slot swap) -> merge as alternatives, assign letter. DONE.
+
+     If B1-B5 all return NO, this phrase needs a NEW script. Proceed to C.
+
+     ============================================================================
+     WORKED EXAMPLE — HOW MERGING ACTUALLY WORKS (READ THIS CAREFULLY)
+     ============================================================================
+
+     PHRASE SET (gift-card topic, 8 phrases — looks heterogeneous on the surface):
+       P1. "you know, gift cards, but I can't access it"
+       P2. "my computer was hacked, and a purchase was made for five hundred
+            dollars worth of gift cards from Amazon"
+       P3. "It's not it's one of those gift cards"
+       P4. "I have a question regarding the gift card"
+       P5. "I would just bought some Apple gift cards, two of them, from Walmart,
+            and they would not accept the second one"
+       P6. "Do you get is it any more beneficial to get the cash or to get credit
+            or to get gift cards?"
+       P7. "I'm saying that there are some times when he does transactions for,
+            like, gift cards and stuff or hide transactions to a random account,
+            that's going to his boyfriend that we've determined as a scammer"
+       P8. "I'm trying to buy some Apple gift cards"
+
+     WRONG APPROACH (what NOT to do) — one script per phrase:
+       Script a: [gift (gift card) (gift cards)] / [access accessing accessed]
+       Script b: [purchase purchased] / [(gift cards) (gift card)]
+       Script c: [(one of those) (one of them)] / [(gift card) (gift cards)]
+       Script d: [question questions] / [regarding about] / [(gift card) (gift cards)]
+       ... (8 scripts total)
+       PROBLEM: bloated script count, low recall, no merge, no bridges, each script
+       a near-duplicate of the others sharing the same topic anchor.
+
+     RIGHT APPROACH — group by shared SHAPE (not by phrase), then merge:
+
+       OBSERVATION 1: P3, P4, P8 share a SHAPE — each has (a) a distinctive
+       context word/phrase early ("trying", "question", "It's not") and (b) a
+       contextual qualifier in the middle ("buy", "regarding", "one of those")
+       and (c) the topic noun gift card(s). DIFFERENT WORDS BUT SAME SHAPE.
+
+       Merge by [OR]-ing the variant words at each slot while sharing the topic:
+         Script a:
+           [trying question "It's not"]
+           [buy regarding "one of those"]
+           (gift [cards card])
+         THREE phrases collapsed into ONE script. The outer [] at slots 1 and 2
+         hold distinct context words from each phrase. The topic anchor is shared.
+
+       OBSERVATION 2: P6 has a unique distinctive structure ("Do you get is it
+       any more beneficial... cash or credit or gift cards"). The literal opener
+       "Do you get is it" is so distinctive it earns "" treatment. The
+       cash-or-giftcards comparison fits into a () unit with {} inside:
+         Script b:
+           "Do you get is it"
+           beneficial
+           (cash {or} "gift cards")
+
+       OBSERVATION 3: P5 has very distinctive verbatim chunks ("from Walmart",
+       "not accept"). When a phrase has 3+ rare verbatim chunks, "" literals are
+       the right anchor — they LOCK the intent tightly:
+         Script c:
+           "gift cards"
+           "from Walmart"
+           "not accept"
+
+       OBSERVATION 4: P1 has a tight verb+noun pattern (can't + access + gift card):
+         Script d:
+           (gift [cards card])
+           can't
+           access
+
+       OBSERVATION 5: P2 has a distinctive narrative shape (hacked + purchase made +
+       dollar-amount + gift cards). The "dollar (gift [cards card])" nested unit
+       captures "dollars worth of gift cards" tightly:
+         Script e:
+           hacked
+           (purchase made)
+           (dollar (gift [cards card]))
+
+       OBSERVATION 6: P7 has a scam-context shape (transactions + gift cards +
+       stuff/random account). The {} inside a () captures the optional connector:
+         Script f:
+           transactions
+           (gift [cards card])
+           (stuff {or} "random account")
+
+       FINAL: 6 scripts for 8 phrases. P3+P4+P8 merged into Script a. Each remaining
+       script has DISTINCT contextual anchors that can\'t cleanly merge into a.
+
+     WHAT THIS TEACHES — APPLY THESE PATTERNS:
+
+     PATTERN A — MERGE BY [OR]-ING DISTINCT CONTEXT WORDS OVER A SHARED TOPIC.
+       When 2+ phrases share a shape (e.g. each has "context-word + qualifier + topic"
+       in that order), collapse them into ONE script. Put the distinct context words
+       from each phrase into the SAME [OR] slot. Share the topic anchor across all.
+       This is the highest-leverage merge pattern. Don\'t skip it.
+
+     PATTERN B — USE "" LITERALS FREELY AS DISTINCTIVE ANCHORS.
+       "" is not a last-resort tool. When a phrase has a verbatim chunk that\'s
+       distinctive enough to be its own anchor (e.g. "from Walmart", "It\'s not",
+       "Do you get is it", "random account"), use "" directly. Often cleaner than
+       building [] / () structures to approximate the same thing.
+
+     PATTERN C — () UNITS CAN CONTAIN {} FOR OPTIONAL CONNECTORS.
+       (cash {or} "gift cards") means: cash, optionally followed by "or", followed
+       by "gift cards" — all as one unit. Use this when an optional connector word
+       sits BETWEEN two anchors INSIDE a single unit.
+
+     PATTERN D — TOPIC ANCHOR FORM ADAPTS TO CONTEXT.
+       Sometimes the topic is (gift [cards card]). Sometimes "gift cards" as a
+       literal. Sometimes nested deeper: (dollar (gift [cards card])). Use the
+       form that locks the surrounding context — not always the same shape.
+
+     PATTERN E — SCRIPT COUNT EMERGES FROM B1-B5, NOT FROM A TARGET.
+       Each new phrase is run through B1-B5 against every existing script.
+       Only when EVERY absorption attempt fails does a new script get created.
+       N phrases might produce 1 script (if all share a shape and absorb into
+       one) or N scripts (if every phrase has a unique shape no existing script
+       can absorb). Both are valid — what matters is that every existing script
+       was honestly tried before adding a new one.
+       If your script count equals your phrase count AND any pair of phrases
+       could plausibly share a script structure, you have NOT done B1-B5
+       properly. Re-examine pairs of phrases for shared shapes.
+
+     ============================================================================
+
+
+  C. BUILD A NEW SCRIPT — STRUCTURE-LOCKED PRECISION
+
+     A script targets ONE sub-intent. Build it to match THIS phrase set\'s actual
+     structure. Don\'t copy the shape of any example script — derive shape from
+     the phrases you\'re given.
+
+     1. IDENTIFY SLOTS
+        Read all phrases in the sub-intent group. Identify the SLOTS (aspects of
+        the speech-act that vary across the phrases). Most intents have 2-5 slots.
+        Simpler intents have fewer; complex intents have more.
+
+        Examples of slot types (not a closed list — derive what fits this intent):
+          - SPEECH-ACT VERB (asking / confirming / requesting / stating)
+          - FRAME (who, what, how, can-you, do-you)
+          - QUALIFIER (modifier on the topic noun)
+          - TOPIC (the noun the intent is about)
+          - TIME (today, now, yesterday, when)
+          - SUBJECT (I, we, you, they)
+        Pick ONLY slots that actually vary across the approved phrases. Don\'t add
+        slots that don\'t appear.
+
+     2. COLLECT VARIANTS PER SLOT
+        For each slot, list every variant seen in the approved phrases.
+
+     3. CHOOSE THE SHAPE PER SLOT
+        For each slot, pick the structural shape that LOCKS the variants without
+        over-firing:
+
+        SHAPE A — single keyword (when one word covers all phrases at this slot)
+          Just the plain word as the AND token.
+
+        SHAPE B — flat OR (when variants are independent words)
+          [variant1 variant2 variant3]
+
+        SHAPE C — locked combinations (when variants are specific word pairings)
+          ([slotA1 slotA2] [slotB1 slotB2])
+          The () unit locks the combination. Internal [] gives variation at
+          each sub-slot. Use whenever the phrase set has only SPECIFIC pairings,
+          not every cross-product.
+
+        SHAPE D — mixed alternatives (plain words + () units in one slot)
+          [plain ([modal] verb) other-plain (multi-word phrase)]
+          Outer [] wraps any mix of token types as alternatives.
+
+        SHAPE E — deeply nested (when slots have internal locks AT MULTIPLE LEVELS)
+          [(prefix [varA varB]) plain-fallback]
+          Nest as deeply as the phrase set\'s structure demands. No depth limit.
+
+     4. ASSEMBLE AND ASSEMBLE BRIDGES
+        Stack slot tokens in speech order at the top level (newline OR space —
+        both mean AND). Where a non-article gap of 4+ words appears between
+        slots in any phrase, add a {} bridge between those two slot tokens.
+
+     5. APPLY :-1 GUARDS WHERE NEEDED
+        For each non-relevant phrase in the input:
+          - Shared structure with a relevant phrase? -> embed :-1 at the natural
+            position of the distinguishing word (Part 5 Rule A Case 1)
+          - Unrelated topic? -> separate negation script (Part 5 Rule A Case 2)
+
+     6. STRUCTURE MATCHES INTENT — NO ARBITRARY DEPTH
+        A simple intent (one slot, independent variation) -> simple flat script.
+        A complex intent (multiple slots with locked combinations) -> deeper nesting.
+        Don\'t inflate structure beyond what the phrases require. Don\'t deflate
+        structure when the phrases lock combinations.
+
+  D. GAP WALK THE NEW SCRIPT (mandatory before output)
+     For every approved phrase this script is meant to catch, including the one
+     that triggered creation:
+     1. Walk script tokens left to right.
+     2. Count non-article gap between EACH adjacent pair of script lines in this phrase.
+     3. For EACH gap ≥ 4 non-article words, add its OWN {} bridge at that position
+        (or pick closer anchors). A phrase with two wide gaps gets two bridges. Three
+        wide gaps gets three bridges. Each bridge sits between its own pair of anchors.
+        See LONG-PHRASE STRATEGY L2 below for the multi-bridge worked example.
+     4. Repeat until every gap in every targeted phrase is ≤ 3 non-article words.
+
+     ============================================================================
+     LONG-PHRASE STRATEGY — when an approved phrase has 12+ content words
+     ============================================================================
+
+     Long phrases (12+ content words, ignoring articles) are the #1 cause of
+     coverage failure. The score formula is matched_tokens / path_span, so a
+     15-word phrase with anchors 14 words apart needs ~14 matched tokens to hit
+     .95. A short script with 3-4 tokens scores around .25, far below threshold.
+
+     Five explicit strategies to handle long phrases. Pick the one that fits
+     the phrase\'s actual shape:
+
+     STRATEGY L1 — SHRINK THE PATH SPAN BY PICKING CLOSE ANCHORS
+       Long phrases often contain distinctive words SCATTERED across the full
+       length. Don\'t anchor on all of them. Pick 2-3 anchors that SIT CLOSE
+       TOGETHER in the phrase, and ignore the rest.
+
+       Example phrase (17 words):
+         "my computer was hacked, and a purchase was made for five hundred
+          dollars worth of gift cards from Amazon"
+       Distinctive words at positions: hacked(4), purchase(7), made(9),
+                                       dollars(11), gift cards(14-15), Amazon(17)
+       WRONG (wide span):
+         hacked / (gift [cards card]) / Amazon
+         Path span: 17-4 = 13 words. Numerator: ~4. Ratio: ~0.31 ✗
+       RIGHT (close anchors, ignoring distant ones):
+         hacked
+         (purchase made)
+         (dollar (gift [cards card]))
+         Path span: 15-4 = 11 words. Numerator: 1+2+3 = 6. Ratio: ~0.55 ✗
+       STILL NOT ENOUGH — needs L2 or L4 in addition.
+
+     STRATEGY L2 — DENSIFY THE PATH WITH MULTIPLE {} BRIDGES
+       Once anchors are picked, fill the gaps between them with {} bridges
+       containing the actual words from the phrase. Multi-bridge expected for
+       multiple wide gaps.
+
+       Continuing the example:
+         hacked
+         {and a purchase was made for}    <- bridges gap between hacked and purchase
+         (purchase made)
+         {for five hundred}               <- bridges gap before dollars
+         (dollar (gift [cards card]))
+       Path span: 11 words. Numerator: 1 + 6 (bridge 1) + 2 + 3 (bridge 2) + 3 = 15
+       (but capped at the path span = 11). With bridge words hitting in order,
+       ratio approaches 0.9+.
+
+       KEY: bridge contents come FROM THE PHRASE. Read the words in the actual
+       gap and put them in {} in left-to-right order. Don\'t invent bridge words.
+
+     STRATEGY L3 — USE DISTINCTIVE "" LITERALS TO ANCHOR LONG PHRASES
+       Long phrases often contain 2-4 word verbatim chunks that are highly
+       distinctive ("from Walmart", "random account", "five hundred dollars",
+       "not accept", "purchase was made"). These chunks LOCK precision while
+       contributing multiple words to the numerator.
+
+       Example phrase (18 words):
+         "I would just bought some Apple gift cards, two of them, from Walmart,
+          and they would not accept the second one"
+       Three distinctive chunks: "gift cards" / "from Walmart" / "not accept"
+       Script:
+         "gift cards"
+         "from Walmart"
+         "not accept"
+       Path span: ~9 words (gift cards to not accept).
+       Numerator: 2 + 2 + 2 = 6.
+       Ratio: 6/9 = 0.67 — still tight, but bridgeable to .85+. For .95, add a
+       {} bridge between two of the literals containing the actual gap words.
+
+     STRATEGY L4 — SPLIT THE PHRASE INTO TWO SCRIPTS BY SUB-INTENT
+       Some long phrases contain TWO sub-intents bolted together with "and" or
+       similar. Each sub-intent can be its own script targeting a SUBSET of the
+       phrase.
+
+       Example phrase (30+ words):
+         "I\'m saying that there are some times when he does transactions for,
+          like, gift cards and stuff or hide transactions to a random account,
+          that\'s going to his boyfriend that we\'ve determined as a scammer"
+       Two sub-intents: (1) transactions with gift cards, (2) scam/scammer context.
+       Don\'t try to write one script that catches the whole phrase. Write:
+         Script X (transactions sub-intent):
+           transactions
+           (gift [cards card])
+           (stuff {or} "random account")
+       This catches the relevant portion of the long phrase. Score is computed
+       on THE PORTION the script matches, not the full transcript — so a script
+       anchored at positions 12-25 has a path span of 13, not 30.
+
+       KEY INSIGHT: the AND-gate doesn\'t require the script to match the FULL
+       phrase. It requires the script\'s tokens to match SOMEWHERE in the phrase,
+       in order. So you can target the dense middle portion and ignore the
+       beginning/end of a long rambling phrase.
+
+     STRATEGY L5 — ACCEPT IRREDUCIBILITY AND MARK PENDING
+       Some long phrases are genuinely irreducible: scattered distinctive words
+       with no dense cluster, no distinctive verbatim chunks, no sub-intent
+       partition that captures the meaning. Trying to script these at .95
+       threshold produces broken output.
+
+       The correct action: mark the phrase as "pending" in the analysis output
+       with a reason like "phrase too long with no dense anchor cluster — would
+       need threshold relaxation."
+
+       This is BETTER than:
+         - Shipping a script with 8 tokens hoping for the best (it won\'t hit .95)
+         - Lowering the threshold below user-specified (breaks the threshold contract)
+         - Padding the script with weak anchors (creates false positives)
+
+     ============================================================================
+     LONG-PHRASE PROCESS — APPLY IN ORDER:
+       1. Count content words in the phrase. If 12+, this is a long phrase.
+       2. Scan for distinctive verbatim chunks (2-4 words) -> if 2+, try L3.
+       3. Scan for sub-intent split points (and / or / "but" connectors with
+          coherent sub-intents on each side) -> if found, try L4.
+       4. Identify cluster of distinctive anchors close together -> try L1 + L2.
+       5. If none of L1-L4 produces a script that realistically clears
+          threshold in gap walk -> apply L5 (mark pending).
+     ============================================================================
+
+  E. PRE-FLIGHT THE SCRIPT (before outputting JSON)
+     Run all 5 CHECKS — these are the structural correctness audits:
+
+       CHECK 1 — NO DUPLICATES inside any {} vs the line IMMEDIATELY BEFORE and the
+                 line IMMEDIATELY AFTER. Every word in {} must be absent from both
+                 neighbours at any nesting depth. (Real failure: duplicates have
+                 dropped scores from .97 to .89 in testing.) See section 2.5.
+
+       CHECK 2 — REMOVAL TEST on every token. For each token in the script, ask:
+                 "If I remove this token, does any approved phrase LOSE an essential
+                 anchor?" YES = keep, NO = remove. See section 1.1.5.
+
+       CHECK 3 — GAP WALK every targeted phrase. For each adjacent pair of script
+                 tokens, count non-article words in the gap. If 4+, add {} bridge
+                 or pick closer anchors. Estimate the resulting score per phrase
+                 must clear threshold. See Section D LONG-PHRASE STRATEGIES.
+
+       CHECK 4 — {} POSITION: no {} as the first or last line of the script.
+                 {} is a bridge — it must sit BETWEEN two anchor lines. See section 2.5.
+
+       CHECK 5 — CROSS-TOKEN ANCHOR REDUNDANCY (within one script): no anchor
+                 concept should be required by two different top-level AND tokens
+                 OF THE SAME SCRIPT. The AND-gate requires each top-level token to
+                 match a DIFFERENT occurrence in the transcript — if "gift cards"
+                 appears in both token 1's alternative AND as token 3, the phrase
+                 must contain "gift cards" twice. Fix by removing one. NOTE: reusing
+                 a topic anchor ACROSS different scripts is fine and expected.
+
+  F. CROSS-SCRIPT CONSOLIDATION PASS (after all phrases processed, before output)
+     Once every approved phrase has been assigned to a script via A-E, look at the
+     resulting script set as a whole. Some scripts may have ended up STRUCTURALLY
+     SIMILAR enough to be merged into one. This pass collapses them.
+
+     WHY: a script set of 3 tight scripts is easier to maintain and review than 6
+     scripts with overlapping shape. The B-section merges absorbed individual phrases
+     into existing scripts; this F-section absorbs whole scripts into each other when
+     they emerge looking similar.
+
+     PAIRWISE MERGE CANDIDATES — for every pair of scripts (a, b):
+
+     F1. SAME AND-LINE COUNT?
+         Both scripts must have the same number of AND lines (counting {} bridges
+         and :-1 guards). If the counts differ, no merge possible — moving on.
+
+     F2. POSITION-BY-POSITION COMPATIBLE?
+         Walk the two scripts in parallel, line by line. At each position, the two
+         tokens must be of compatible TYPE — both [OR groups], or both (phrase groups),
+         or both {} bridges, or one is a plain keyword and the other is an [OR group]
+         containing that keyword.
+
+         INCOMPATIBLE — different types at one position:
+           Script a line 2: [raise start]
+           Script b line 2: {to gonna}              <- bridge vs OR group — incompatible
+         COMPATIBLE — same type, can be unioned:
+           Script a line 2: [raise start]
+           Script b line 2: [escalate boost]        <- both OR groups — can union to [raise start escalate boost]
+         COMPATIBLE — plain keyword and OR group containing it:
+           Script a line 2: credit                  <- plain keyword
+           Script b line 2: [credit account]       <- OR group containing it — union to [credit account]
+
+         If ANY position is incompatible, no merge possible — moving on.
+
+     F3. NEGATION GUARDS COMPATIBLE?
+         If either script has an embedded :-1 guard, the merged script must keep
+         it without suppressing the OTHER script's relevant phrases.
+
+         SAFE: both scripts share the same negation context (same approved/non-relevant pattern)
+              -> merge the :-1 guards into one [] with union of negation words
+         UNSAFE: each script's :-1 guards a different non-relevant phrase that the
+                other script's phrases might accidentally contain
+              -> do not merge
+
+     F4. MERGE BY UNIONING TOKENS AT EACH POSITION
+         If F1, F2, F3 all pass, build the merged script:
+           - For each line position, take the UNION of tokens from both scripts
+           - [OR groups] union by concatenating unique options
+           - (phrase groups) at the same position become alternatives in one [] line
+             e.g. line is (close session) in a and (reach out) in b -> [(close session)(reach out)]
+           - {} bridges union by concatenating unique non-article words
+           - Plain keywords get wrapped into [] with the other script's tokens
+
+         WORKED EXAMPLE:
+           Script a (3 lines):
+             [(haven't heard back)(heard back for)]
+             {a while}
+             [(close this session)(closing this session)]
+           Script b (3 lines):
+             [(haven't heard from you)(I haven't heard)]
+             {a while}
+             [(reach out)(chat in)(chatting with)]
+           Both have 3 lines, all positions compatible (OR-OR, {}-{}, OR-OR).
+           Merged script:
+             [(haven't heard back)(heard back for)(haven't heard from you)(I haven't heard)]
+             {a while}
+             [(close this session)(closing this session)(reach out)(chat in)(chatting with)]
+           One script catches everything both originals caught. Three lines instead of six.
+
+     F5. RE-VALIDATE THE MERGE — run E (pre-flight) on the merged script
+         The merge can only ship if:
+           - Every approved phrase from BOTH original scripts still passes the
+             AND-line gate (every AND line has a hit in the phrase)
+           - Gap walk still passes (≤ 3 non-article gap for every targeted phrase)
+           - No duplicates introduced in {} versus the new neighbouring lines
+           - {} still sits between two anchor lines
+
+         If pre-flight fails on the merged script, ABANDON THE MERGE. Keep the two
+         original scripts as they were. A failed merge is a no-op — never ship a
+         merge that breaks coverage of even one approved phrase.
+
+     CONSERVATIVE BIAS:
+     Only merge when F1-F4 produce a clean structural match. Do NOT force merges by
+     restructuring scripts to match each other — that's how coverage gets lost.
+     Two clean separate scripts are better than one over-merged script that misses
+     phrases. If in doubt, leave them separate.
+
+  G. FINAL VERIFICATION PASS — BEFORE EMITTING JSON (PRODUCTION GUARD)
+
+     Production scripts run against 10,000+ call transcripts. A single false
+     positive vector multiplies into hundreds of bad insights. A single missed
+     phrase fails the category. This pass closes both risks through a forced
+     per-phrase verification step.
+
+     COMMON FAILURE MODE THIS PASS PREVENTS:
+     The AI assigns scriptLetter to a phrase based on intent ("this script was
+     designed for this phrase") WITHOUT actually verifying that the script
+     clears threshold on the phrase. The output then claims coverage that
+     doesn't exist when the scripts are tested. This is the #1 cause of
+     low real-world recall despite high reported recall.
+
+     G1. BUILD THE COVERAGE VERIFICATION TABLE (mandatory before any JSON emit)
+
+         For EACH approved phrase in the input, fill out one row:
+
+           | Phrase                  | Best script | Est. score | Verified? |
+           |-------------------------|-------------|------------|-----------|
+           | "phrase 1 text..."      | a           | 0.96       | YES       |
+           | "phrase 2 text..."      | a           | 0.78       | NO → pending |
+           | "phrase 3 text..."      | -           | -          | pending (uncoverable) |
+           | "phrase 4 text..."      | b           | 1.00       | YES       |
+
+         How to fill each row:
+
+           Step 1 — BEST SCRIPT: For this phrase, identify which existing script
+           is the best candidate (the one most likely to fire on it).
+
+           Step 2 — AND-GATE CHECK: Walk every top-level AND token of that
+           script against the phrase, left to right. Does the phrase contain
+           content satisfying each token, in order? If ANY token has no hit,
+           the script does not fire on this phrase. Row = pending.
+
+           Step 3 — GAP WALK + SCORE ESTIMATE: If the gate passes, count the
+           path span (first matched word to last matched word in the phrase).
+           Count the matched tokens including any {} bridge words that hit.
+           Estimate: matched / span. This is the est. score.
+
+           Step 4 — VERIFICATION: Is est. score >= threshold (default .95)?
+             YES -> Verified = YES. scriptLetter = the chosen script letter.
+             NO  -> Verified = NO. scriptLetter is NOT emitted. Status = pending.
+
+           Step 5 — IF NOT VERIFIED, TRY TO FIX FIRST: before accepting pending,
+           try LONG-PHRASE STRATEGIES L1-L5 from Section D. Try absorbing into
+           a DIFFERENT existing script via B1-B5. Only after honest attempts
+           fail does the row stay at pending.
+
+     G2. STRICT VERIFICATION RULE (THIS IS NON-NEGOTIABLE):
+
+         In the analysis array of the output JSON:
+           - scriptLetter is ONLY emitted for phrases with Verified = YES in
+             the coverage table. Never assign a scriptLetter based on intent
+             alone or because the script was built with that phrase in mind.
+           - If you have not walked the gap walk math and estimated the score
+             clears threshold, the phrase MUST have status = "pending".
+           - "pending" is the correct, honest output for any phrase you cannot
+             verify clears threshold against an existing script. It is NOT a
+             failure marker — it tells the user which phrases need attention.
+
+         This rule prevents the most common failure: the AI claiming coverage
+         that doesn't actually exist when scripts are tested.
+
+     G3. SCRIPT DELETION — REMOVE ORPHAN SCRIPTS
+
+         After the coverage table is complete: any script that is NOT the
+         "Best script" for at least one Verified = YES row must be DELETED
+         from the output. A script that doesn't fire as the primary catch
+         for any verified phrase is dead weight — it adds maintenance cost
+         and false-positive risk without contributing coverage.
+
+         The output scripts[] array contains only scripts that catch at least
+         one phrase at >= threshold.
+
+     G4. FALSE-POSITIVE SCAN
+
+         For each remaining script in your set, mentally generate 3-5 phrases
+         that would "almost" match — same topic words but different intent.
+         Walk these almost-matches through the script:
+           - Does the AND-gate fail on the almost-match? -> good, FP avoided
+           - Does the almost-match satisfy every AND token? -> POSSIBLE FP
+             -> Tighten by adding a () unit lock, an extra anchor, or a :-1 guard.
+
+         The non-relevant phrases in the input set are the FIRST source of FP
+         vectors. For each non-relevant phrase, verify NO script fires on it
+         (gate fails OR score below threshold). If a script does fire on a
+         non-relevant phrase, apply Part 5 Rule A.
+
+     G5. HONEST PRECISION AND RECALL
+
+         Calculate from the coverage table:
+           recall = (rows with Verified = YES) / (total approved phrases)
+           precision = (relevant phrases that fire) / (all phrases that fire)
+
+         Report these honestly in the output JSON. If recall is below 0.8,
+         that is the true state — do NOT inflate the number. The user needs
+         the accurate recall to know which phrases need attention (the
+         pending rows).
+
+     G6. EMIT THE OUTPUT JSON
+         Only after G1-G5 are complete. The analysis array reflects the
+         coverage table exactly: Verified = YES phrases get scriptLetter,
+         everything else gets status = "pending".
+
+     CALIBRATION FOR PRODUCTION SCALE:
+       - At 10,000 calls, a 1% false positive rate = 100 bad insights per category.
+       - Prefer ONE more script (extra precision) over ONE looser script (FP risk).
+       - When uncertain between tighter and looser, choose TIGHTER and rely on
+         multiple scripts in the set to capture variation.
+       - Cross-product false positives (flat [a b] / [c d] firing on "a d" when
+         only "a c" and "b d" were in phrases) are the #1 cause of FP at scale.
+         Lock cross-products with () units whenever the phrase set has only
+         specific combinations.
+
+THE BENEFIT OF THIS ORDER:
+  - Merging happens DURING construction, not after. Most phrases are absorbed at B2/B3.
+  - The same algorithm handles 1 phrase or 100 phrases — no special cases.
+  - Bracket choices are forced by which step succeeds: B2 adds a new () alternative,
+    B3 widens an [], B4 adds {}, B5 wraps inversions as (order1)(order2) alternatives.
+  - Gap walking is run on every new script during construction (D), not just at
+    output. Fixing gaps mid-construction is faster than after.
+  - Pre-flight (E) catches the duplicates / removable tokens / {} placement issues
+    that have caused real failures in past testing.
+  - Cross-script consolidation (F) catches scripts that ended up structurally similar
+    after independent construction. Collapses them when safe. Halves script count in
+    the right scenarios without losing coverage.
+  - Final verification (G) is the production guard: it checks that every approved
+    phrase is covered, that no false-positive vector slips through, and that
+    threshold scoring is realistic. Required before output.
+
+BRACKET DECISION SUMMARY (which bracket for which job):
+  [OR group]       — OR over any tokens (words, (), \"\", or NESTED [] / ())
+  (phrase group)   — UNIT: makes whatever's inside act as one token from outside.
+                     Contains: words, [], (), \"\", {}, or any nested combination.
+                     Internal words still count for path-score (score-transparent).
+  {optional words} — non-article connector words bridging a 4+ word gap. PLAIN WORDS ONLY.
+  \"exact phrase\"   — literal fixed wording (rare). PLAIN WORDS ONLY, max ~5 words.
+  :-1              — negation weight on ANY token at ANY depth (word, \"\", [], (), nested)
+
+  [] and () compose freely with each other to any depth. {} and \"\" do NOT nest —
+  they hold plain words only. :-1 attaches to any token, including a deeply nested one.
+
+  WHEN TO REACH FOR (): any time something must act as ONE thing in the structure
+  (one slot in an [], one AND line, one negation unit). Wrap it in () even if it
+  contains [OR groups] or other ()'s. Examples: (gift [card cards]), ([the my] credit),
+  ([please can] [you we] help) — each is one unit despite internal complexity.
+
+
+═══════════════════════════════════════════════════════════════════════════════
+PART 4 — MERGING REFERENCE (catalogue of patterns)
+═══════════════════════════════════════════════════════════════════════════════
+
+The master algorithm Section B (B1-B5) and Section F handle merging operationally.
+This part is a quick-reference catalogue for choosing the right nesting pattern.
+
+# 4.1 Guiding Principle
+
+Merge decisions depend on the CATEGORY being built and the PHRASE SET, not on
+abstract structural rules. First ask "does this phrase belong in the same category
+as the existing scripts?" — if YES, run B1-B5 to merge; if NO (opposite intent,
+wrong topic), keep it out even when the structure looks identical.
+
+SAFE merge  = the new AND line is satisfied by EVERY phrase the script already covers
+UNSAFE merge = the new AND line is missing from even ONE approved phrase
+  Example UNSAFE: Script "training / [great awesome]" already covers "training is great".
+  Adding [I he she] in between would break that phrase (it has no I/he/she).
+
+# 4.2 Nesting Patterns by Phrase Shape
+
+SHALLOW — flat OR over parallel concepts:
+  [(direct interest) (premium interest) (benefits checking) (tell a friend)]
+
+SHALLOW — separate AND lines, each a flat OR:
   [confirm confirming verify]
-  [(missing items) (items there) (items you are missing) (items missing)]
+  [(missing items) (items there) (items missing)]
 
-MEDIUM — word order variants using [OR] inside ():
-  [(visa [invitation application] letter) ([invitation application] letter [for the] visa)]
+INVERSION inside one OR line:
+  [(visa [invitation application] letter) ([invitation application] letter for visa)]
 
-COMPLEX — subject + tense + topic all vary across phrases:
-  Phrases: "I'll get a credit raised" / "he raised the credit" / "we put a credit through" / "let me start the credit"
-  CORRECT — all approved phrases contain these words, safe to merge:
+INDEPENDENT VARIATION — subject + verb + topic each varying:
+  Phrases: "I will get a credit raised" / "he raised the credit" / "let me start the credit"
+  Script:
     [I he she we (let me)]
     [get put raise raised start]
-    {a the your}
     credit
 
-COMPLEX — negation embedded, detection + suppression in one script:
-  training
-  [not isn't wasn't]:-1
-  [great awesome bomb cool]
-  Covers all "training is [positive]" phrases. Suppresses "training is not great" in same script.
+EMBEDDED NEGATION — detection + suppression in one script:
+  Relevant: "training is great"   Non-relevant: "training is not great"
+  Script:
+    training
+    [not isn\'t wasn\'t]:-1
+    [great awesome bomb]
 
-COMPLEX — agent vs customer intent (genuinely different layers, must be 2 scripts):
+LOCKED COMBINATIONS — multiple slots with internal locks:
+  Phrases: "can I help you" / "can we help you" / "may I assist" / "could you help"
+  WRONG (flat — loses precision, fires on cross-products):
+    [can could may] / [I we you] / [help assist]
+  RIGHT (() units lock the valid combinations):
+    [(can [I we] [help assist] you)
+     (may I [help assist] you)
+     ([could would] you [help assist])]
+
+SEPARATE SCRIPTS — different speakers, two scripts:
   Script a (agent offering):
     [(can I) (shall I) (let me) (I can)]
-    {just quickly}
     [book arrange schedule]
     [valuation evaluation]
   Script b (customer requesting):
     [(can you) (could you) wanna]
-    {to just}
     [book arrange schedule]
     [valuation evaluation]
 
-### Nesting Patterns (quick reference)
-- Same layers, different topic phrase -> add new () to existing [] at that position
-- Same words, different subject/speaker -> widen subject [OR group]
-- Same phrase, different tense -> add tense variants to action [OR group]
-- Negation is the negated form of existing relevant phrases -> embed :-1 at its natural position inside the same script
-- Colloquial variant of existing phrase -> add as additional () in the []
+# 4.3 Quick Pattern Lookup
 
-WHEN to create a new script (not merge):
-  - An extra AND line would break coverage of any existing approved phrase
-  - Different intent type (offering vs requesting vs confirming)
-  - Nesting would exceed 3 levels
-  - Opposite meaning that would break existing matches
+  Same layers, different topic phrase
+    -> add a new () to the existing [] at the topic slot
 
-NO DOUBLE-GUARDING:
-If a false positive is already handled by a dedicated negation script, do NOT also embed a :-1 guard for it inside the detection script. Pick one approach only:
-  - Embed :-1 inside the detection script (when the negation word naturally falls between anchor words)
-  - OR write a dedicated negation script (when it is a contextually wrong phrase with no negation word)
+  Same words, different subject/speaker
+    -> widen the subject [OR group]
 
-  WRONG — double-guarded:
-    Script a:
-      training
-      [not isn't wasn't]:-1
-      [(cooled down) (down outside)]:-1   <- handles "cooled down outside" case
-      [cool great bomb awesome]
-    Script b:
-      (cooled down outside):-1            <- ALSO handles the same case
-      training
+  Same phrase, different tense
+    -> add tense variants to the action [OR group]
 
-  CORRECT — each case handled once:
-    Script a:
-      training
-      [not isn't wasn't]:-1              <- handles "training is NOT great"
-      [cool great bomb awesome]
-    Script b:
-      (cooled down outside):-1           <- handles "it cooled down outside after training"
-      training
+  Non-relevant phrase shares anchor structure with relevant, distinguishing
+  word(s) sit between existing anchors
+    -> embed :-1 at the natural position (the distinguishing word is whatever
+       differentiates non-relevant from relevant)
 
-  The :-1 guard inside script a handles negation words (not/isn't/wasn't).
-  Script b handles the contextually wrong phrase. No overlap.
+  Colloquial variant of existing phrase
+    -> add as an additional () inside the existing []
 
-Labels: a, b, c … z then aa, bb … zz.
-Minimal is best: one or two precise AND lines beats five loose ones.
+# 4.4 When to Create a New Script (not merge)
 
----
+  - Word order inversion at the AND-line level — first try [(order1) (order2)]
+    inside one [] (merge). Create a new script only when path-scoring needs more
+    word coverage than one script can carry, or when sequences genuinely flip.
+  - An extra AND line would break coverage of any existing approved phrase.
+  - Different intent type (offering vs requesting vs confirming) — but only when
+    the category scope distinguishes them. If the category covers both, merge.
+  - Opposite-meaning words — only when category scope EXCLUDES the opposite. If
+    broad ("credit limit changes"), include both in one [OR]. If narrow ("credit
+    limit increases"), the opposite phrase becomes non-relevant and gets :-1.
 
-# NEGATION RULES
+THERE IS NO MAXIMUM NESTING DEPTH. Nest as many levels deep as the approved phrases require.
+LABELS: a, b, c … z then aa, bb, cc … zz.
 
-## Rule A — Text non-relevant phrases: ALWAYS write a negation script
-Every text non-relevant phrase MUST produce its own dedicated negation script in scripts[].
-Do not skip any. Write them as standalone scripts so they are visible and publishable.
+═══════════════════════════════════════════════════════════════════════════════
+PART 5 — NEGATION RULES
+═══════════════════════════════════════════════════════════════════════════════
 
-## Rule B — Screenshot non-relevant phrases: negate based on score color only
-- Red thumb + GREEN score -> false positive firing -> MUST get :-1 guard (embed in relevant scripts)
-- Red thumb + RED/ORANGE score -> already suppressed -> NO :-1 needed
-- ALL red thumbs are non-relevant. Score only determines if a :-1 fix is additionally needed.
+# Rule A — Text Non-Relevant Phrases: Two Cases
 
-## Rule C — Two types of negation
+KEY PRINCIPLE: :-1 negates ANY word or phrase that signals non-relevance for THIS
+category. Not just "not / isn't / wasn't" — those are common but not the only ones.
+The distinguishing word is whatever differentiates the non-relevant phrase from the
+relevant ones. Build the :-1 list from the actual non-relevant phrases provided.
+
+CASE 1 — Distinguishing word naturally falls between anchor words of a relevant phrase:
+  Embed the :-1 guard inside the detection script at that natural position.
+  Do NOT write a separate negation script.
+
+  Example 1 (classic negation word):
+  Relevant: "training is great"   Non-relevant: "training is not great"
+  -> embed [not isn't wasn't]:-1 between training and [great awesome]
+
+  Example 2 (non-classic — category: cancel subscription):
+  Relevant: "I want to cancel"   Non-relevant: "I want to keep my subscription"
+  -> embed [keep continue retain]:-1 between [I want] and [cancel]
+
+CASE 2 — Contextually wrong phrase (different topic/domain, no shared structure):
+  Write a dedicated standalone negation script in scripts[] with its own letter.
+  Do NOT embed inside detection scripts — the detection script isn't firing on it.
+
+  Example: Relevant: "training is great"
+  Non-relevant: "it cooled down outside after training"
+  -> Script b: (cooled down outside):-1 / training
+
+THE TEST: does the non-relevant phrase share the SAME anchor structure as a
+relevant phrase, with one or more words DIFFERENT in a way that signals non-relevance?
+  YES -> Case 1: embed :-1 inside detection script at the position of the differing word(s)
+  NO (different topic / unrelated context) -> Case 2: dedicated standalone negation script
+
+
+# Rule B — Screenshot Non-Relevant Phrases: Score Color Determines :-1 Need
+
+  Red thumb + GREEN score -> false positive currently firing -> MUST get :-1 guard (embed in relevant scripts)
+  Red thumb + RED/ORANGE score -> already suppressed below threshold -> NO :-1 needed
+  ALL red thumbs are non-relevant. Score only determines if a :-1 fix is additionally needed.
+
+
+# Rule C — Two Types of Negation
 
 TYPE 1 — BROAD CONTEXT SUPPRESSOR [OR group]:-1
-Deliberately wide. Suppresses an entire semantic context, not one specific phrase.
-Collect all words that signal "wrong topic/context" and put :-1 on the whole group.
-Exact phrases and (phrase groups) can live inside a broad [OR group]:-1:
-  [like should technical more add (clear by) thought understand "not requiring" "paper work"]:-1
+  Deliberately wide. Suppresses an entire semantic context, not one specific phrase.
+  Collect all words that signal "wrong topic/context" and put :-1 on the whole group.
+  Exact phrases and (phrase groups) can live inside:
+    [like should technical more add (clear by) thought "not requiring" "paper work"]:-1
 
 TYPE 2 — SURGICAL (phrase group):-1
-Narrow. Targets one specific false positive phrase.
-Extract the most distinctive words from that exact phrase:
-  ("see how much is in" "my checking account"):-1
+  Narrow. Targets one specific false positive phrase. Extract distinctive words:
+    ("see how much is in" "my checking account"):-1
 
 COMPLEX — ([OR group] (phrase group)):-1
-Nest an [OR group] and a (phrase group) together inside () with :-1:
-  ([non not isn't wasn't] (clear by)):-1
-  -> Suppresses: any negation word appearing together with the phrase "clear by"
+  Nest both inside () with :-1 to suppress a specific context+phrase combination:
+    ([non not isn't wasn't] (clear by)):-1
 
 CHOOSE:
-  - Wrong context/topic -> TYPE 1: wide [OR group]:-1
-  - Specific false positive -> TYPE 2: narrow (phrase group):-1
-  - Specific context + phrase combination -> COMPLEX: ([OR] (phrase group)):-1
+  - Wrong context/topic         -> TYPE 1: wide [OR group]:-1
+  - Specific false positive     -> TYPE 2: narrow (phrase group):-1
+  - Specific context + phrase   -> COMPLEX: ([OR] (phrase group)):-1
 
-## Rule D — Placement
 
-Text non-relevant (no score) -> dedicated standalone negation script in scripts[] with its own letter.
-Do NOT also embed the same guard inside detection scripts.
-The phrase has no green score — the detection script is NOT firing on it, so there is nothing to suppress there.
-Adding a :-1 inside a detection script that isn't even firing is unnecessary and dangerous — it risks suppressing real relevant phrases that happen to share those words.
+# Rule D — Placement (Maps to Rule A's Two Cases)
 
-  WRONG — dedicated script b exists AND guard embedded in script a:
-    Script a: training / [not isn't wasn't]:-1 / [(cooled down)(down outside)]:-1 / [cool great awesome]
-    Script b: (cooled down outside):-1 / training
-    The phrase has no green score. Script a is not firing on it. The embedded guard is unnecessary.
+Rule A defined two cases for text non-relevant phrases. Rule D says where the
+:-1 actually goes in each case:
 
-  CORRECT — dedicated script only, detection script untouched:
-    Script a: training / [not isn't wasn't]:-1 / [cool great awesome bomb]
-    Script b: (cooled down outside):-1 / training
+CASE 1 (from Rule A) — Distinguishing word falls between anchors of a relevant phrase
+  -> embed :-1 INSIDE the detection script at that natural position.
+  Do NOT create a separate negation script for the same phrase.
 
-Screenshot false positive (red thumb + GREEN score) -> embed :-1 as a line INSIDE each relevant
-script that is actively firing on it. No separate script letter needed — embedding in every
-firing script is sufficient.
+  Relevant: "training is great"   Non-relevant: "training is not great"
+    Script a: training / [not isn't wasn't]:-1 / [great awesome bomb]
+  No standalone script — the guard sits inline where the negation word appears.
 
----
+CASE 2 (from Rule A) — Different topic/domain, no shared anchor structure
+  -> write a DEDICATED standalone negation script in scripts[] with its own letter.
+  Do NOT embed inside the detection script — the detection script doesn't fire on
+  this phrase anyway, and adding the guard there risks suppressing real relevant
+  phrases that happen to share some of those words.
 
-# OUTPUT
+  Relevant: "training is great"
+  Non-relevant: "it cooled down outside after training"
+    Script a: training / [not isn't wasn't]:-1 / [cool great awesome bomb]  <- clean
+    Script b: (cooled down outside):-1 / training                            <- dedicated
+
+SCREENSHOT FALSE POSITIVE (red thumb + GREEN score)
+  -> embed :-1 INSIDE each relevant script that is actively firing on it.
+  Functionally Case 1 — the false positive shares structure with the relevant phrase.
+
+NO DOUBLE-GUARDING: whichever placement you choose for a given non-relevant
+phrase, do NOT also use the other approach. Pick one, not both.
+
+
+# Rule E — The Threshold Contract
+
+Just as relevant phrases must score AT OR ABOVE the user threshold, non-relevant
+phrases must score BELOW it. The :-1 guards exist to push the score below threshold
+— not just to subtract some points.
+
+  Relevant phrase     -> score ≥ threshold (e.g. ≥ .95) -> script fires
+  Non-relevant phrase -> score < threshold  (e.g. < .95) -> script does NOT fire
+
+If a :-1 guard is too weak, the non-relevant phrase can still score above threshold
+and fire as a false positive. To strengthen guards:
+
+  1. PREFER BROAD [OR group]:-1 over narrow ("phrase"):-1 when the wrong context
+     has multiple distinguishing words. Each match in the [OR group]:-1 pulls the
+     score down further.
+
+  2. STACK MULTIPLE :-1 LINES if a single guard isn't enough:
+       [not isn't wasn't]:-1
+       [(cooled down) (down outside)]:-1
+     Two guards working together push the score lower than either alone.
+
+  3. PLACE :-1 GUARDS AT THE NATURAL POSITION where the negation/wrong-context
+     word actually appears. A guard placed off-position may not match at all.
+
+THE MENTAL MODEL: every :-1 hit subtracts from the path score. Tune guards so the
+non-relevant phrase's final score lands BELOW the user threshold, and the relevant
+phrase's score stays AT OR ABOVE it.
+
+  WRONG mindset:   ":-1 added, job done."
+  CORRECT mindset: "After this :-1, does the non-relevant phrase still score above
+                    threshold? If yes, the guard is too weak — broaden or stack."
+
+═══════════════════════════════════════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════════════════════
 
 YOUR RESPONSE MUST START WITH { ON THE VERY FIRST CHARACTER.
-No steps, no classification text, no markdown, no preamble. Do all analysis silently.
+No steps, no classification text, no markdown, no preamble.
 
 Return ONLY a valid JSON object. No text before or after. No markdown fences. No trailing commas:
+
 {"categoryName":"...","definition":"...","analysis":[{"phrase":"...","status":"relevant","scriptLetter":"a","why":"..."}],"scripts":[{"letter":"a","lines":["line1"],"covers":"...","threshold":".95"}],"synonyms":{"word":["s1","s2","s3"]},"precision":"1.00","recall":"0.95"}
 
-- Text non-relevant phrases -> each gets its own dedicated negation script with its own letter
+REMINDERS:
+- BEFORE EMITTING: run Section G FULLY. Build the coverage verification table
+  first (G1), apply the strict rule (G2), delete orphan scripts (G3), run FP
+  scan (G4), calculate honest precision/recall (G5).
+- STRICT VERIFICATION RULE (G2): scriptLetter is ONLY emitted for phrases whose
+  estimated score against that script clears threshold (Verified=YES in coverage
+  table). Phrases you haven't gap-walked and verified MUST have status="pending".
+  Never assign scriptLetter based on intent or because the script was designed
+  with that phrase in mind. This is the #1 cause of bad output — DO NOT skip.
+- DYNAMIC SCRIPT COUNT: build each script to cover as MANY phrases as possible.
+  Create a new script ONLY when a phrase truly cannot be absorbed into any
+  existing script (every B1-B5 attempt fails). No fixed target — script count
+  emerges from the phrase set.
+- DELETE ORPHAN SCRIPTS (G3): any script that is not the "Best script" for at
+  least one Verified=YES phrase must be removed from scripts[]. Do not emit
+  scripts that don't catch anything.
+- Text non-relevant phrases -> follow Rule A's two cases: embed :-1 inside the
+  detection script (Case 1) OR write a dedicated standalone negation script
+  (Case 2). Never both.
 - Screenshot false positives -> embed :-1 inside each relevant script, no separate letter
 - status must be exactly: "relevant" | "nonrelevant" | "pending"
 - Target threshold .95 unless told otherwise
-- Use only words that appear in the approved phrases — do not invent`;
+- Use only words that appear in the approved phrases — never invent
+- HONEST RECALL: recall in the output JSON = (Verified=YES phrases) / (total
+  approved phrases). Do not inflate. If recall is below 0.8, that is the true
+  state — the pending phrases tell the user where to look.
+- Production scale: 10,000+ calls. Tighter beats broader. When in doubt,
+  add a () unit to lock combinations rather than leave flat [a b] / [c d] cross-products.`;
 
 const DEFAULT_COMPARE_SYS = `You are a Tethr QA analyst. Compare AI vs human scripts, find gaps, return merged improvements.
 Return ONLY a valid JSON object. No text before or after. No markdown fences. No trailing commas:
@@ -1267,7 +2864,7 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
 }
 
 // ─── COMPARE TAB ──────────────────────────────────────────────────────────────
-function CompareTab({ aiResult, cst, setCst, comparePrompt }) {
+function CompareTab({ aiResult, cst, setCst, comparePrompt, modelConfig }) {
   const set = (k, v) => setCst((p) => ({ ...p, [k]: v }));
   function handleImgs(arr, ri) {
     if (ri!==undefined) setCst((p) => ({...p, cmpImgs:p.cmpImgs.filter((_,i)=>i!==ri)}));
@@ -1287,7 +2884,7 @@ function CompareTab({ aiResult, cst, setCst, comparePrompt }) {
     const aiTxt = aiResult.scripts.map((s) => "Script "+s.letter+":\n"+s.lines.join("\n")).join("\n\n");
     const phrases = aiResult.analysis.map((a) => "["+a.status+"] "+a.phrase).join("\n");
     content.push({ type:"text", text:"AI scripts:\n"+aiTxt+"\n\nHuman scripts:\n"+(cst.humanTxt||"(see screenshots)")+"\n\nPhrases:\n"+phrases+"\n\nCompare, find gaps, return improved merged scripts." });
-    try { const r = await callAPI(comparePrompt, content, 3000); set("cmpResult", r); }
+    try { const r = await callAPI(comparePrompt, content, 3000, modelConfig); set("cmpResult", r); }
     catch(e) { set("cmpErr", e.message); }
     finally { set("cmpLoading", false); }
   }
@@ -1372,13 +2969,13 @@ function BasicsTab() {
   const ops = [
     { op:'[word1 word2 "phrase"]', col:A.monoBlue, name:"OR group", rule:'Any single item inside [] satisfies that line. Three usages: (1) On its own line as an AND condition — [raise start get put] means the call must contain one of these words for this line to be satisfied; (2) Nested inside a (phrase group) as a sub-group for OR variation within a phrase sequence — (how [may can what] I [help assist]) nests two [OR groups] inside a (); (3) With :-1 for negation — [won\'t unable cannot "can\'t"]:-1 suppresses score when any item matches. Items can be plain words, "exact phrases", or (phrase groups).' },
     { op:'(phrase words)', col:A.monoBlue, name:"Phrase group", rule:"Groups content as a single unit. Three usages: (1) Inside [] as one OR option: [(over the phone) (when you call)]; (2) Standalone on its own line as an AND condition: (Don't tell compliance); (3) With :-1 for negation. Inside () you can nest plain words, [OR groups], and exact phrases: (Compliance [doesn't don't] need to know). Complex negation: ([non not isn't wasn't] (clear by)):-1 — nests an [OR group] AND a (phrase group) together inside () with :-1." },
-    { op:"{word1 word2}", col:A.monoTeal, name:"Optional neutral words", rule:'INDIVIDUAL PLAIN WORDS ONLY — each entry is a single word, not a phrase or sequence. {to quickly} = two separate words. {of them} = the word "of" and the word "them" independently, NOT the phrase "of them" in order. No [], (), or quotes inside {}. Neutral-weight — fires with or without them. Two valid placements: (1) Standalone on its own line as a bridge between anchor lines; (2) Inside a (phrase group): (cash {or} "gift cards"). Cannot go inside [] — WRONG: [{two three} of them]. CORRECT: [two three] on one line, {of them} on the next.' },
+    { op:"{word1 word2}", col:A.monoTeal, name:"Optional neutral words", rule:'INDIVIDUAL PLAIN WORDS ONLY, in left-to-right order — each entry is a single word, not a phrase. Each word is OPTIONAL (zero, some, or all may hit), but whichever do hit must appear in the order written. {to quickly} = two optional words; if both appear, "to" must come before "quickly". {of them} = the word "of" optionally followed by "them". Order is preserved like every other Tethr operator. No [], (), or quotes inside {}. Neutral-weight — fires with or without them. Two valid placements: (1) Standalone on its own line as a bridge between anchor lines; (2) Inside a (phrase group): (cash {or} "gift cards"). Cannot go inside [] — WRONG: [{two three} of them]. CORRECT: [two three] on one line, {of them} on the next.' },
     { op:'"exact phrase"', col:A.monoRed, name:"Exact sequence", rule:'Fixed word sequence — maximum 5 words. Use ONLY when the sequence must appear verbatim (e.g. "thank you for calling", "terms and conditions"). If words within the sequence can naturally swap, use a (phrase group) with nested [OR groups] instead. WRONG: ["how may I help" "how can I help" "how can I assist"]. CORRECT: (how [may can what] I [help assist]) — one phrase group catches all variations. Test: could a caller say it with one word swapped and mean the same thing? Yes → use (phrase group). No → use "exact phrase".' },
     { op:"token:-1", col:A.red, name:"Negative weight", rule:'Suppresses score for the line it is on. Two types: (1) BROAD CONTEXT SUPPRESSOR — a wide [OR group]:-1 collecting many contextual words that signal wrong topic: [like should technical more add "not requiring" "paper work"]:-1. Deliberately wide — the breadth is the point. Exact phrases can live inside. (2) SURGICAL — a narrow (phrase group):-1 targeting a specific false positive: ("see how much is in" "my checking account"):-1. Complex form: ([OR group] (phrase group)):-1 nests both inside one () with :-1 to suppress a specific context+phrase combination.' },
     { op:"keyword", col:A.text, name:"Plain keyword", rule:"Matches anywhere in the transcript. Each line is an AND condition — all lines must match for the script to fire." },
   ];
   const guardrails = [
-    { n:"1", t:"AND lines are order-independent — inversions don't need separate scripts", b:'Tethr matches AND lines anywhere in the transcript — they do not need to appear in the order written. So one script with training + [great awesome] fires on both "Training is great" AND "How great was training today". You only need separate scripts when a (phrase group) or "exact phrase" forces a specific word order that cannot be expressed otherwise.' },
+    { n:"1", t:"Order is everything — AND lines match left to right as a whole unit", b:'ALL AND lines must match left to right in the order written. The script matches a phrase as a whole, in sequence. "Training is great" (training then great) and "How great was training today" (great then training) are DIFFERENT word orders and need SEPARATE scripts. Always scan all approved phrases for inversions and create a separate script for each distinct left-to-right order.' },
     { n:"2", t:"Strip filler words", b:'Remove is, am, the, very, really, just unless inside an exact quoted phrase. Fillers add noise and hurt precision.' },
     { n:"3", t:"Identify the intent type — it drives the precision gate", b:'Intent takes 7 forms: (1) Questioning — what/which/how/can you; (2) Confirming — confirm/confirming/"just to confirm"; (3) Action — raise/put/get/start/escalate; (4) Existence/State — have/got/"there is"/"you have"; (5) Offering — "can I"/"shall I"/"let me"/"I\'ll"; (6) Requesting — "can you"/"could you"/"would you"; (7) Awareness — "I see"/"I can see"/"looking at". Include intent when the topic words alone are too common. Omit it when the topic anchor is already highly specific.' },
     { n:"4", t:"(phrase groups) inside [] for topic variation only — not the whole script", b:'Use (phrase groups) as OR options inside [] for the TOPIC layer only, when the same concept appears in multiple word orders: [(visa letter) (letter for visa) (visa [application invitation] letter)]. Never collapse an entire script into one massive OR group of phrase groups — that destroys AND precision. Each script still needs its full layered AND structure (subject → action → topic). The phrase group OR pattern is just for the topic layer.' },
@@ -1464,25 +3061,11 @@ function BasicsTab() {
 // ─── PROMPTS TAB ─────────────────────────────────────────────────────────────
 function PromptsTab({ buildPrompt, setBuildPrompt, comparePrompt, setComparePrompt }) {
   const [activePrompt, setActivePrompt] = useState("build");
-  const [saved, setSaved] = useState(false);
 
   const current = activePrompt === "build" ? buildPrompt : comparePrompt;
-  const setCurrent = activePrompt === "build" ? setBuildPrompt : setComparePrompt;
   const defaultVal = activePrompt === "build" ? DEFAULT_BUILD_SYS : DEFAULT_COMPARE_SYS;
-  const isModified = current !== defaultVal;
   const charCount = current.length;
   const lineCount = current.split("\n").length;
-
-  function handleSave(val) {
-    setCurrent(val);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1600);
-  }
-
-  function handleReset() {
-    setCurrent(defaultVal);
-    setSaved(false);
-  }
 
   // Extract guardrail lines for the sidebar (lines starting with a number)
   const guardrailLines = defaultVal.split("\n").filter((l) => /^\d+\./.test(l.trim()));
@@ -1495,7 +3078,7 @@ function PromptsTab({ buildPrompt, setBuildPrompt, comparePrompt, setCompareProm
   return (
     <div style={{ paddingTop: 28 }}>
       <p style={{ fontSize: 14, color: A.secondary, lineHeight: 1.7, marginBottom: 24 }}>
-        View and edit the system prompts sent to the AI. Changes apply immediately to all future generations.
+        View the system prompts sent to the AI. Read-only.
       </p>
 
       {/* Prompt selector */}
@@ -1505,9 +3088,6 @@ function PromptsTab({ buildPrompt, setBuildPrompt, comparePrompt, setCompareProm
             style={{ padding: "14px 18px", borderRadius: A.radius, border: "2px solid " + (activePrompt === pt.id ? A.blue : A.divider), background: activePrompt === pt.id ? A.blueBg : A.white, cursor: "pointer", boxShadow: activePrompt === pt.id ? "0 0 0 4px rgba(0,113,227,.08)" : A.shadowSm, transition: "all .15s" }}>
             <p style={{ fontSize: 14, fontWeight: 600, color: activePrompt === pt.id ? A.blue : A.text, marginBottom: 4 }}>{pt.label}</p>
             <p style={{ fontSize: 12, color: A.secondary, margin: 0, lineHeight: 1.5 }}>{pt.desc}</p>
-            {activePrompt === pt.id && isModified && (
-              <span style={{ marginTop: 8, display: "inline-block", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 20, background: A.orangeBg, color: A.orange }}>Modified</span>
-            )}
           </div>
         ))}
       </div>
@@ -1519,28 +3099,14 @@ function PromptsTab({ buildPrompt, setBuildPrompt, comparePrompt, setCompareProm
             <SectionLabel>{activePrompt === "build" ? "Build" : "Compare"} system prompt</SectionLabel>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <span style={{ fontSize: 11, color: A.tertiary }}>{charCount.toLocaleString()} chars · {lineCount} lines</span>
-              {isModified && (
-                <button onClick={handleReset}
-                  style={{ fontSize: 12, padding: "4px 11px", borderRadius: 6, border: "none", background: A.redBg, color: A.red, cursor: "pointer", fontFamily: SF, fontWeight: 500 }}>
-                  Reset to default
-                </button>
-              )}
-              <button onClick={() => handleSave(current)}
-                style={{ fontSize: 12, padding: "4px 11px", borderRadius: 6, border: "none", background: saved ? A.greenBg : A.blue, color: saved ? A.greenDk : "#fff", cursor: "pointer", fontFamily: SF, fontWeight: 600, transition: "all .2s" }}>
-                {saved ? "Saved ✓" : "Save changes"}
-              </button>
+              <CopyBtn text={current} />
             </div>
           </div>
           <textarea
             value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-            style={{ ...fieldStyle, minHeight: 480, fontFamily: MONO, fontSize: 12.5, lineHeight: 1.8, resize: "vertical", padding: "14px 16px" }}
+            readOnly
+            style={{ ...fieldStyle, minHeight: 480, fontFamily: MONO, fontSize: 12.5, lineHeight: 1.8, resize: "vertical", padding: "14px 16px", cursor: "text", background: A.fill }}
           />
-          {isModified && (
-            <p style={{ fontSize: 12, color: A.orange, marginTop: 8 }}>
-              ⚠ You have unsaved changes. Click "Save changes" to apply, or "Reset to default" to revert.
-            </p>
-          )}
         </div>
 
         {/* Sidebar */}
@@ -1589,14 +3155,14 @@ function PromptsTab({ buildPrompt, setBuildPrompt, comparePrompt, setCompareProm
             </div>
           </Card>
 
-          {/* Tips */}
+          {/* Notes */}
           <Card padding="16px 18px">
-            <p style={{ fontSize: 12, fontWeight: 700, color: A.blue, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Editing tips</p>
+            <p style={{ fontSize: 12, fontWeight: 700, color: A.blue, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>How this prompt works</p>
             {[
-              "Always end with 'Return ONLY raw JSON' to prevent markdown wrapping.",
-              "Add domain-specific examples (e.g. healthcare, finance) to the guardrails section.",
-              "Adjust the number of scripts (2–4) to control output verbosity.",
-              "Add custom synonym rules for your industry's vocabulary.",
+              "Always ends with 'Return ONLY raw JSON' to prevent markdown wrapping.",
+              "Includes domain-specific guardrails to keep outputs consistent.",
+              "Caps script count (2–4) to control output verbosity.",
+              "Encodes synonym expansion rules used for every category.",
             ].map((tip, i) => (
               <p key={i} style={{ fontSize: 12, color: A.secondary, lineHeight: 1.5, marginBottom: 6 }}>· {tip}</p>
             ))}
@@ -1635,7 +3201,7 @@ TETHR SYNTAX:
 OUTPUT — return ONLY this JSON, nothing else, starting with { on the very first character:
 {"summary":"...","pendingAnalysis":[{"phrase":"...","action":"merged","scriptLetter":"a","why":"..."}],"updatedScripts":[{"letter":"a","lines":["line1"],"covers":"...","threshold":".95","changed":true,"changeNote":"..."}],"newScripts":[{"letter":"x","lines":["line1"],"covers":"...","threshold":".95"}],"preservedCoverage":true,"warnings":[]}`;
 
-function CustomScriptTab({ buildPrompt, setTab }) {
+function CustomScriptTab({ buildPrompt, setTab, modelConfig }) {
   const [phraseImgs, setPhraseImgs] = useState([]);
   const [scriptImgs, setScriptImgs] = useState([]);
   const [humanScriptTxt, setHumanScriptTxt] = useState("");
@@ -1704,7 +3270,7 @@ IMPORTANT: Respond with ONLY the raw JSON object. Do not write any analysis, exp
     content.push({ type: "text", text: txt });
 
     try {
-      const r = await callAPI(DEFAULT_CUSTOM_SYS, content, 4000);
+      const r = await callAPI(DEFAULT_CUSTOM_SYS, content, 4000, modelConfig);
       setResult(r);
     } catch (e) {
       setError(e.message);
@@ -1904,6 +3470,9 @@ export default function App() {
   const [compareSt, setCompareSt] = useState({ humanTxt:"", cmpImgs:[], cmpLoading:false, cmpErr:"", cmpResult:null });
   const [buildPrompt, setBuildPrompt] = useState(DEFAULT_BUILD_SYS);
   const [comparePrompt, setComparePrompt] = useState(DEFAULT_COMPARE_SYS);
+  const [provider, setProvider] = useState("openai");
+  const [model, setModel] = useState(MODEL_OPTIONS.openai[0].value);
+  const modelConfig = { provider, model };
 
   async function generate() {
     setCst((p) => ({ ...p, buildErr:"" }));
@@ -1960,17 +3529,17 @@ Also extract all scripts from the Scripts panel — every letter, every line of 
 KEY REMINDERS:
 - Use the SUBJECT → INTENT → NEGATION → ACTION → BRIDGE → TOPIC layer structure. Each layer is a separate AND line in speech order.
 - Extract 2-3 word anchors per phrase — a single common word gives too little weight. Find the word COMBINATIONS that make each phrase distinctive.
-- Detect word order inversions — same core words in different order across phrases = separate script for each ordering.
-- USE {} optional bridge words instead of exact phrases for spoken language. "just to confirm" -> just / {to quickly gonna} / confirm. Exact phrases miss 80% of real calls because spoken language inserts filler words.
-- A script can be as short as one or two lines if that is all the phrase needs. Minimal and precise beats broad.
+- ORDER IS ENFORCED EVERYWHERE. ALL AND lines must match left to right in the order written. The same core words in a different order across phrases = SEPARATE script. Scan ALL approved phrases for inversions before writing any script — every distinct left-to-right ordering needs its own script letter.
+- USE {} optional bridge words instead of exact phrases for spoken language. "just to confirm" -> just / {to quickly gonna} / confirm.
+- BEFORE adding any AND line ask: "Does every approved phrase contain a word satisfying this line, AND does that word appear after the words on all previous lines?" If no — don't add it.
+- LARGE PHRASE SETS: if given 10+ phrases, merge aggressively into 3-6 scripts maximum using [OR of phrase groups]. Do NOT create one script per phrase.
 
 SMART MERGING USING NESTING:
 - Use [(phrase group A) (phrase group B)] to collapse multiple word order variants into one AND line
 - Use (phrase [OR group] word) to handle OR variation within a phrase group rather than splitting scripts
 - If two scripts share the same layers but differ in one OR group → widen that OR group and merge
-- If two scripts differ only in word order of the topic → use [( order1 ) ( order2 )] in one line
+- For (phrase group) order variants → use [( order1 ) ( order2 )] on the same line — one script
 - Never nest more than 3 levels deep — if it gets more complex, split into two scripts
-- Word order inversions (topic before verb vs verb before topic) CANNOT be merged — always separate
 
 NON-RELEVANT PHRASES — TWO DIFFERENT APPROACHES, NEVER BOTH:
 
@@ -1999,12 +3568,12 @@ Set threshold to ${threshold} on all scripts. Assign each relevant phrase the be
 
 REMINDER: Output ONLY the raw JSON object. Your response must start with { immediately. No steps, no classification, no explanation before the JSON.`;
     content.push({ type:"text", text:ut });
-    try { const r = await callAPI(buildPrompt, content, 4000); setResult(r); }
+    try { const r = await callAPI(buildPrompt, content, 8000, modelConfig); setResult(r); }
     catch(e) { setBuildError(e.message); }
     finally { setLoading(false); setLoadMsg(""); }
   }
 
-  const TABS = [["create","Create"],["validate","Validate"],["compare","Compare"],["custom","Custom Script"],["basics","Scripting Basics"],["prompt","Prompt"]];
+  const TABS = [["create","Create"],["validate","Validate"],["basics","New Category Scripting Basics"],["prompt","Prompt"]];
 
   return (
     <div style={{ background:A.pageBg, minHeight:"100vh", fontFamily:SF, color:A.text, fontSize:14 }}>
@@ -2027,7 +3596,30 @@ REMINDER: Output ONLY the raw JSON object. Your response must start with { immed
               </button>
             ))}
           </div>
-          <div style={{ marginLeft:"auto", display:"flex", gap:6 }}>
+          <div style={{ marginLeft:"auto", display:"flex", gap:8, alignItems:"center" }}>
+            <div style={{ display:"flex", gap:8, alignItems:"center", background:A.fill, border:"1px solid "+A.divider, borderRadius:10, padding:"5px 8px" }}>
+              <select
+                value={provider}
+                onChange={(e) => {
+                  const nextProvider = e.target.value;
+                  setProvider(nextProvider);
+                  setModel(MODEL_OPTIONS[nextProvider][0].value);
+                }}
+                style={{ border:"none", background:"transparent", fontFamily:SF, fontSize:12, color:A.text }}
+              >
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+              </select>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                style={{ border:"none", background:"transparent", fontFamily:SF, fontSize:12, color:A.text, minWidth:130 }}
+              >
+                {MODEL_OPTIONS[provider].map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
             <span style={{ fontSize:12, color:A.tertiary, padding:"4px 10px", background:A.fill, borderRadius:6, fontWeight:500 }}>GBR</span>
             <span style={{ fontSize:12, color:A.tertiary, padding:"4px 10px", background:A.fill, borderRadius:6, fontWeight:500 }}>Transcript</span>
           </div>
@@ -2037,8 +3629,8 @@ REMINDER: Output ONLY the raw JSON object. Your response must start with { immed
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"0 24px 60px" }}>
         {tab==="create" && <CreateTab st={cst} setSt={setCst} onGenerate={generate} />}
         {tab==="validate" && <ValidateTab result={result} loading={loading} msg={loadMsg} error={buildError} onEdit={() => setTab("create")} onCompare={() => setTab("compare")} />}
-        {tab==="compare" && <CompareTab aiResult={result} cst={compareSt} setCst={setCompareSt} comparePrompt={comparePrompt} />}
-        {tab==="custom" && <CustomScriptTab buildPrompt={buildPrompt} setTab={setTab} />}
+        {tab==="compare" && <CompareTab aiResult={result} cst={compareSt} setCst={setCompareSt} comparePrompt={comparePrompt} modelConfig={modelConfig} />}
+        {tab==="custom" && <CustomScriptTab buildPrompt={buildPrompt} setTab={setTab} modelConfig={modelConfig} />}
         {tab==="basics" && <BasicsTab />}
         {tab==="prompt" && <PromptsTab buildPrompt={buildPrompt} setBuildPrompt={setBuildPrompt} comparePrompt={comparePrompt} setComparePrompt={setComparePrompt} />}
       </div>
