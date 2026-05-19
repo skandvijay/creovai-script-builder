@@ -2278,12 +2278,11 @@ LARGE INPUT EXECUTION NOTE:
 const DEFAULT_ANALYSIS_SYS = `You are a Tethr QA analyst.
 
 Given scripts plus a list of phrases, judge each phrase in order and return ONLY one valid JSON object:
-{"analysis":[{"phrase":"...","status":"relevant","scriptLetter":"a"}]}
+{"analysis":[{"phrase":"...","status":"relevant"}]}
 
 Rules:
 - Return exactly one analysis item per input phrase, in the same order.
 - status must be exactly one of: "relevant", "nonrelevant", "pending".
-- scriptLetter is allowed ONLY when status is "relevant".
 - expectedStatus tells you the source label:
   - relevant: mark "relevant" only if a script clearly covers it at threshold, otherwise "pending"
   - pending: mark "relevant" if clearly covered, otherwise "pending"
@@ -3093,12 +3092,9 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
               const statusBg = isR ? A.greenBg : isP ? A.orangeBg : A.redBg;
               return (
                 <div key={i} style={{ padding:"10px 18px", borderBottom:"1px solid "+A.divider, display:"flex", gap:12, alignItems:"center", justifyContent:"space-between", background:isP?A.orangeBg:A.white }}>
-                  <div style={{ display:"flex", alignItems:"center", gap:10, flex:1, minWidth:0 }}>
-                    {item.scriptLetter ? <ScriptBadge letter={item.scriptLetter} size={16} /> : null}
-                    <p style={{ flex:1, minWidth:0, fontSize:13, color:isR?A.text:isP?A.orange:A.tertiary, margin:0, lineHeight:1.45, fontStyle:!isR&&!isP?"italic":"normal" }}>
-                      {item.phrase}
-                    </p>
-                  </div>
+                  <p style={{ flex:1, minWidth:0, fontSize:13, color:isR?A.text:isP?A.orange:A.tertiary, margin:0, lineHeight:1.45, fontStyle:!isR&&!isP?"italic":"normal" }}>
+                    {item.phrase}
+                  </p>
                   <Tag label={statusLabel} color={statusColor} bg={statusBg} />
                 </div>
               );
@@ -3790,7 +3786,6 @@ export default function App() {
       mergedAnalysis.push(...chunkAnalysis.map((item, index) => ({
         phrase: item.phrase || chunk[index].phrase,
         status: item.status || "pending",
-        scriptLetter: item.status === "relevant" ? item.scriptLetter : undefined,
         _expectedStatus: chunk[index].expectedStatus,
       })));
     }
