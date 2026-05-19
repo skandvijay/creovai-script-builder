@@ -2310,6 +2310,72 @@ const ratioString = (num, den) => den ? (num / den).toFixed(2) : "1.00";
 function buildScriptsText(scripts) {
   return (scripts || []).map((s) => `Script ${s.letter}:\n${(s.lines || []).join("\n")}\nThreshold: ${s.threshold || ".95"}\nCovers: ${s.covers || ""}`).join("\n\n");
 }
+function isStandaloneBridgeLine(line) {
+  return /^\{[^{}]+\}$/.test(String(line || "").trim());
+}
+function repairScriptLines(lines, label) {
+  let repaired = Array.isArray(lines)
+    ? lines.map((line) => String(line ?? "").trim()).filter(Boolean)
+    : [];
+  const warnings = [];
+
+  while (repaired.length && isStandaloneBridgeLine(repaired[0])) {
+    warnings.push(`${label}: removed leading bridge line ${repaired[0]}`);
+    repaired = repaired.slice(1);
+  }
+  while (repaired.length && isStandaloneBridgeLine(repaired[repaired.length - 1])) {
+    warnings.push(`${label}: removed trailing bridge line ${repaired[repaired.length - 1]}`);
+    repaired = repaired.slice(0, -1);
+  }
+
+  return { lines: repaired, warnings };
+}
+function sanitizeScriptList(scripts, listLabel) {
+  const warnings = [];
+  const sanitized = [];
+
+  for (const script of Array.isArray(scripts) ? scripts : []) {
+    const label = `${listLabel} ${script?.letter || "?"}`;
+    const { lines, warnings: lineWarnings } = repairScriptLines(script?.lines, label);
+    warnings.push(...lineWarnings);
+    if (!lines.length) {
+      warnings.push(`${label}: removed script because no valid anchor lines remained after repair`);
+      continue;
+    }
+    sanitized.push({ ...script, lines });
+  }
+
+  return { scripts: sanitized, warnings };
+}
+function sanitizeBuildResult(result) {
+  if (!result || !Array.isArray(result.scripts)) return result;
+  const { scripts, warnings } = sanitizeScriptList(result.scripts, "Script");
+  return {
+    ...result,
+    scripts,
+    warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), ...warnings],
+  };
+}
+function sanitizeCompareResult(result) {
+  if (!result || !Array.isArray(result.improvedScripts)) return result;
+  const { scripts, warnings } = sanitizeScriptList(result.improvedScripts, "Improved script");
+  return {
+    ...result,
+    improvedScripts: scripts,
+    warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), ...warnings],
+  };
+}
+function sanitizeCustomResult(result) {
+  if (!result) return result;
+  const updated = sanitizeScriptList(result.updatedScripts || [], "Updated script");
+  const added = sanitizeScriptList(result.newScripts || [], "New script");
+  return {
+    ...result,
+    updatedScripts: updated.scripts,
+    newScripts: added.scripts,
+    warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), ...updated.warnings, ...added.warnings],
+  };
+}
 function getSaidByLabel(saidBy) {
   return (saidBy || "any")==="internal"
     ? "Internal (agent/rep only)"
@@ -2960,6 +3026,7 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
   const shown = filter==="all" ? analysis : analysis.filter((a) => a.status===filter);
   const visibleAnalysis = shown.slice(0, analysisLimit);
   const pScore = parseFloat(result.precision||"1");
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
 
   return (
     <div style={{ paddingTop:28 }}>
@@ -2980,6 +3047,19 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
           </div>
         </div>
       </Card>
+
+      {warnings.length > 0 && (
+        <Card style={{ marginBottom:16 }} padding="12px 18px">
+          <p style={{ fontSize:12, fontWeight:700, color:A.orange, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:8 }}>
+            Script repairs applied
+          </p>
+          {warnings.map((warning, index) => (
+            <p key={index} style={{ fontSize:12, color:A.secondary, margin:"0 0 4px", lineHeight:1.5 }}>
+              {warning}
+            </p>
+          ))}
+        </Card>
+      )}
 
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
         {/* Phrases */}
@@ -3085,7 +3165,7 @@ function CompareTab({ aiResult, cst, setCst, comparePrompt, modelConfig }) {
       ? `\n\nOnly the first ${phrasePreview.length} analysed phrases are included here to keep comparison stable.`
       : "";
     content.push({ type:"text", text:"AI scripts:\n"+aiTxt+"\n\nHuman scripts:\n"+(cst.humanTxt||"(see screenshots)")+"\n\nPhrases:\n"+phrases+phraseNote+"\n\nCompare, find gaps, return improved merged scripts." });
-    try { const r = await callAPI(comparePrompt, content, 3000, modelConfig); set("cmpResult", r); }
+    try { const r = sanitizeCompareResult(await callAPI(comparePrompt, content, 3000, modelConfig)); set("cmpResult", r); }
     catch(e) { set("cmpErr", e.message); }
     finally { set("cmpLoading", false); }
   }
@@ -3471,7 +3551,7 @@ IMPORTANT: Respond with ONLY the raw JSON object. Do not write any analysis, exp
     content.push({ type: "text", text: txt });
 
     try {
-      const r = await callAPI(DEFAULT_CUSTOM_SYS, content, 4000, modelConfig);
+      const r = sanitizeCustomResult(await callAPI(DEFAULT_CUSTOM_SYS, content, 4000, modelConfig));
       setResult(r);
     } catch (e) {
       setError(e.message);
@@ -3677,12 +3757,12 @@ export default function App() {
 
   async function runScalableBuild({ defText, contextText, saidBy, threshold, phraseData }) {
     setLoadMsg(`Generating scalable script set for ${phraseData.generationRelevant.length + phraseData.nonRelevant.length} unique phrases…`);
-    const base = await callAPI(
+    const base = sanitizeBuildResult(await callAPI(
       buildPrompt + LARGE_INPUT_BUILD_SUFFIX,
       [{ type:"text", text: buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant: phraseData.generationRelevant, nonRelevant: phraseData.nonRelevant, pending: phraseData.pending }) }],
       6000,
       modelConfig
-    );
+    ));
 
     if (!Array.isArray(base.scripts) || !base.scripts.length) {
       throw new Error("Scalable build did not return any scripts.");
@@ -3715,15 +3795,16 @@ export default function App() {
     const approvedCovered = mergedAnalysis.filter((item) => item._expectedStatus === "relevant" && item.status === "relevant").length;
     const nonRelevantRejected = mergedAnalysis.filter((item) => item._expectedStatus === "nonrelevant" && item.status === "nonrelevant").length;
 
-    return {
-      categoryName: base.categoryName || defText.trim() || "Category",
-      definition: base.definition || defText.trim() || "",
-      scripts: base.scripts || [],
-      synonyms: base.synonyms || {},
-      analysis: mergedAnalysis.map(({ _expectedStatus, ...item }) => item),
-      precision: ratioString(nonRelevantRejected, nonRelevantTotal),
-      recall: ratioString(approvedCovered, approvedTotal),
-    };
+      return {
+        categoryName: base.categoryName || defText.trim() || "Category",
+        definition: base.definition || defText.trim() || "",
+        scripts: base.scripts || [],
+        synonyms: base.synonyms || {},
+        analysis: mergedAnalysis.map(({ _expectedStatus, ...item }) => item),
+        precision: ratioString(nonRelevantRejected, nonRelevantTotal),
+        recall: ratioString(approvedCovered, approvedTotal),
+        warnings: [...(Array.isArray(base.warnings) ? base.warnings : [])],
+      };
   }
 
   async function generate() {
@@ -3828,7 +3909,7 @@ Set threshold to ${threshold} on all scripts. Assign each relevant phrase the be
 
 REMINDER: Output ONLY the raw JSON object. Your response must start with { immediately. No steps, no classification, no explanation before the JSON.`;
     content.push({ type:"text", text:ut });
-    try { const r = await callAPI(buildPrompt, content, 8000, modelConfig); setResult(r); }
+    try { const r = sanitizeBuildResult(await callAPI(buildPrompt, content, 8000, modelConfig)); setResult(r); }
     catch(e) { setBuildError(e.message); }
     finally { setLoading(false); setLoadMsg(""); }
   }
