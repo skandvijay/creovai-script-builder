@@ -1,4 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  chunkArray,
+  collectPhraseInputs,
+  parseCSV,
+  ratioString,
+} from "./lib/inputProcessing.js";
+import { formatClusterSummary } from "./lib/clusterPhrases.js";
+import {
+  sanitizeBuildResult,
+  sanitizeCompareResult,
+  sanitizeCustomResult,
+} from "./lib/scriptValidation.js";
 
 // ─── APPLE DESIGN SYSTEM ─────────────────────────────────────────────────────
 const A = {
@@ -2288,93 +2300,8 @@ Rules:
   - pending: mark "relevant" if clearly covered, otherwise "pending"
   - nonrelevant: mark "nonrelevant" if the scripts should not fire; mark "pending" if a script might fire or you are unsure
 - No markdown, no explanations outside the JSON object.`;
-const parseLines = (t) => t.split("\n").map((l) => l.replace(/^[-•*\d.)]\s*/, "").trim()).filter(Boolean);
-const normalizePhrase = (t) => String(t || "").replace(/\s+/g, " ").trim();
-function dedupeBy(items, keyFn) {
-  const seen = new Set();
-  const out = [];
-  for (const item of items) {
-    const key = keyFn(item);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
-}
-const chunkArray = (arr, size) => {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-};
-const ratioString = (num, den) => den ? (num / den).toFixed(2) : "1.00";
 function buildScriptsText(scripts) {
   return (scripts || []).map((s) => `Script ${s.letter}:\n${(s.lines || []).join("\n")}\nThreshold: ${s.threshold || ".95"}\nCovers: ${s.covers || ""}`).join("\n\n");
-}
-function isStandaloneBridgeLine(line) {
-  return /^\{[^{}]+\}$/.test(String(line || "").trim());
-}
-function repairScriptLines(lines, label) {
-  let repaired = Array.isArray(lines)
-    ? lines.map((line) => String(line ?? "").trim()).filter(Boolean)
-    : [];
-  const warnings = [];
-
-  while (repaired.length && isStandaloneBridgeLine(repaired[0])) {
-    warnings.push(`${label}: removed leading bridge line ${repaired[0]}`);
-    repaired = repaired.slice(1);
-  }
-  while (repaired.length && isStandaloneBridgeLine(repaired[repaired.length - 1])) {
-    warnings.push(`${label}: removed trailing bridge line ${repaired[repaired.length - 1]}`);
-    repaired = repaired.slice(0, -1);
-  }
-
-  return { lines: repaired, warnings };
-}
-function sanitizeScriptList(scripts, listLabel) {
-  const warnings = [];
-  const sanitized = [];
-
-  for (const script of Array.isArray(scripts) ? scripts : []) {
-    const label = `${listLabel} ${script?.letter || "?"}`;
-    const { lines, warnings: lineWarnings } = repairScriptLines(script?.lines, label);
-    warnings.push(...lineWarnings);
-    if (!lines.length) {
-      warnings.push(`${label}: removed script because no valid anchor lines remained after repair`);
-      continue;
-    }
-    sanitized.push({ ...script, lines });
-  }
-
-  return { scripts: sanitized, warnings };
-}
-function sanitizeBuildResult(result) {
-  if (!result || !Array.isArray(result.scripts)) return result;
-  const { scripts, warnings } = sanitizeScriptList(result.scripts, "Script");
-  return {
-    ...result,
-    scripts,
-    warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), ...warnings],
-  };
-}
-function sanitizeCompareResult(result) {
-  if (!result || !Array.isArray(result.improvedScripts)) return result;
-  const { scripts, warnings } = sanitizeScriptList(result.improvedScripts, "Improved script");
-  return {
-    ...result,
-    improvedScripts: scripts,
-    warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), ...warnings],
-  };
-}
-function sanitizeCustomResult(result) {
-  if (!result) return result;
-  const updated = sanitizeScriptList(result.updatedScripts || [], "Updated script");
-  const added = sanitizeScriptList(result.newScripts || [], "New script");
-  return {
-    ...result,
-    updatedScripts: updated.scripts,
-    newScripts: added.scripts,
-    warnings: [...(Array.isArray(result.warnings) ? result.warnings : []), ...updated.warnings, ...added.warnings],
-  };
 }
 function getSaidByLabel(saidBy) {
   return (saidBy || "any")==="internal"
@@ -2392,57 +2319,19 @@ function buildParticipantGuidance(saidBy) {
   }
   return "Scripts should cover both agent and customer phrasing patterns.";
 }
-function collectPhraseInputs({ inputMode, relText, nonText, csvRows }) {
-  if (inputMode === "csv" && Array.isArray(csvRows)) {
-    const analysisItems = dedupeBy(
-      csvRows.map((row) => {
-        const phrase = normalizePhrase(row.phrase);
-        const status = row.status === "relevant"
-          ? "relevant"
-          : row.status === "nonrelevant" || row.status === "non-relevant"
-          ? "nonrelevant"
-          : "pending";
-        return { phrase, expectedStatus: status, notes: row.notes || "" };
-      }),
-      (item) => `${item.expectedStatus}::${item.phrase}`
-    );
-    const approved = dedupeBy(analysisItems.filter((item) => item.expectedStatus === "relevant"), (item) => item.phrase).map((item) => item.phrase);
-    const pending = dedupeBy(analysisItems.filter((item) => item.expectedStatus === "pending"), (item) => item.phrase).map((item) => item.phrase);
-    const nonRelevant = dedupeBy(analysisItems.filter((item) => item.expectedStatus === "nonrelevant"), (item) => item.phrase).map((item) => item.phrase);
-    return {
-      approved,
-      pending,
-      nonRelevant,
-      generationRelevant: dedupeBy([...approved, ...pending], (item) => item).map((item) => item),
-      analysisItems,
-    };
-  }
-
-  const approved = dedupeBy(parseLines(relText).map(normalizePhrase), (item) => item).map((item) => item);
-  const nonRelevant = dedupeBy(parseLines(nonText).map(normalizePhrase), (item) => item).map((item) => item);
-  return {
-    approved,
-    pending: [],
-    nonRelevant,
-    generationRelevant: approved,
-    analysisItems: [
-      ...approved.map((phrase) => ({ phrase, expectedStatus: "relevant" })),
-      ...nonRelevant.map((phrase) => ({ phrase, expectedStatus: "nonrelevant" })),
-    ],
-  };
-}
 function shouldUseScalableMode({ images, generationRelevant, nonRelevant, contextText, defText }) {
   if (images.length) return false;
   const phraseCount = generationRelevant.length + nonRelevant.length;
   const chars = [...generationRelevant, ...nonRelevant].join("\n").length + String(contextText || "").length + String(defText || "").length;
   return phraseCount >= LARGE_INPUT_PHRASE_THRESHOLD || chars >= LARGE_INPUT_CHAR_THRESHOLD;
 }
-function buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant, nonRelevant, pending }) {
+function buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant, nonRelevant, pending, clusters }) {
   let text = `Category definition: ${defText.trim() || "Not provided"}\n`;
   text += `Said by: ${getSaidByLabel(saidBy)}\n`;
   text += `${buildParticipantGuidance(saidBy)}\n`;
   text += `Threshold: ${threshold}\n\n`;
   if (contextText?.trim()) text += `Context examples:\n${contextText.trim()}\n\n`;
+  if (clusters?.length) text += `Deterministic cluster scaffold:\n${formatClusterSummary(clusters)}\n\n`;
   if (generationRelevant.length) text += `Relevant and pending phrases to cover:\n${generationRelevant.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
   if (pending.length) text += `Pending subset inside the cover list:\n${pending.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
   if (nonRelevant.length) text += `Non-relevant phrases to avoid:\n${nonRelevant.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
@@ -2467,22 +2356,6 @@ const toB64 = (f) => new Promise((res, rej) => {
   r.onerror = rej;
   r.readAsDataURL(f);
 });
-
-const parseCSV = (text) => {
-  const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) return [];
-  return lines.slice(1).map((line) => {
-    const cols = []; let cur = "", inQ = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') { if (inQ && line[i+1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
-      else if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ""; }
-      else cur += ch;
-    }
-    cols.push(cur.trim());
-    return { def: cols[0]||"", phrase: cols[1]||"", status: (cols[2]||"").toLowerCase().replace(/[\s-]/g,""), notes: cols[3]||"" };
-  }).filter((r) => r.phrase);
-};
 
 const makeCSV = () => [
   ["Category Definition","Phrase","Status","Notes"],
@@ -3759,7 +3632,7 @@ export default function App() {
     setLoadMsg(`Generating scalable script set for ${phraseData.generationRelevant.length + phraseData.nonRelevant.length} unique phrases…`);
     const base = sanitizeBuildResult(await callAPI(
       buildPrompt + LARGE_INPUT_BUILD_SUFFIX,
-      [{ type:"text", text: buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant: phraseData.generationRelevant, nonRelevant: phraseData.nonRelevant, pending: phraseData.pending }) }],
+      [{ type:"text", text: buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant: phraseData.generationRelevant, nonRelevant: phraseData.nonRelevant, pending: phraseData.pending, clusters: phraseData.clusters }) }],
       6000,
       modelConfig
     ));
