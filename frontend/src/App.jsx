@@ -2265,22 +2265,16 @@ REMINDERS:
 const DEFAULT_COMPARE_SYS = `You are a Tethr QA analyst. Compare AI vs human scripts, find gaps, return merged improvements.
 Return ONLY a valid JSON object. No text before or after. No markdown fences. No trailing commas:
 {"score":"8/10","summary":"...","coverage":{"both":[],"humanOnly":[],"aiOnly":[],"neither":[]},"missingPatterns":[],"actionItems":[],"improvedScripts":[{"letter":"a","lines":[],"covers":"...","threshold":".95"}]}`;
-const DEFAULT_BUILD_SCALABLE_SYS = `You are an expert Tethr speech analytics scripting engineer.
+const LARGE_INPUT_BUILD_SUFFIX = `
 
-Build Tethr detection scripts from large phrase sets. Optimise for stable, compact output.
-
-Return ONLY one valid JSON object with this exact shape:
-{"categoryName":"...","definition":"...","scripts":[{"letter":"a","lines":["line1"],"covers":"...","threshold":".95"}],"synonyms":{"word":["variant1","variant2"]}}
-
-Rules:
-- Do NOT return per-phrase analysis.
-- Do NOT return precision, recall, markdown, explanations, or extra keys.
-- Merge aggressively when phrases share the same intent structure.
-- Use [OR groups], (phrase groups), {optional bridge words}, and surgical :-1 guards when needed.
-- Use only words justified by the provided phrases and category definition.
-- Relevant and pending phrases should be catchable where appropriate.
-- Non-relevant phrases should be suppressed narrowly; avoid broad false-positive-prone anchors.
-- Keep the script set compact and production-oriented.`;
+LARGE INPUT EXECUTION NOTE:
+- Follow all script-building rules from the main system prompt above.
+- This scale mode exists only to keep large runs stable; it does NOT replace the main build prompt.
+- Preserve distinct scripts when phrases differ by order, intent, or topic structure. Do not merge scripts just to reduce count.
+- For this generation step only, return a compact JSON object with:
+  {"categoryName":"...","definition":"...","scripts":[{"letter":"a","lines":["line1"],"covers":"...","threshold":".95"}],"synonyms":{"word":["variant1","variant2"]}}
+- Do not include analysis, precision, or recall in this step; those are handled separately after script generation.
+- Return valid JSON only.`;
 const DEFAULT_ANALYSIS_SYS = `You are a Tethr QA analyst.
 
 Given scripts plus a list of phrases, judge each phrase in order and return ONLY one valid JSON object:
@@ -3684,7 +3678,7 @@ export default function App() {
   async function runScalableBuild({ defText, contextText, saidBy, threshold, phraseData }) {
     setLoadMsg(`Generating scalable script set for ${phraseData.generationRelevant.length + phraseData.nonRelevant.length} unique phrases…`);
     const base = await callAPI(
-      DEFAULT_BUILD_SCALABLE_SYS,
+      buildPrompt + LARGE_INPUT_BUILD_SUFFIX,
       [{ type:"text", text: buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant: phraseData.generationRelevant, nonRelevant: phraseData.nonRelevant, pending: phraseData.pending }) }],
       6000,
       modelConfig
