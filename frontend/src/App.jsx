@@ -2284,17 +2284,15 @@ Rules:
 const DEFAULT_ANALYSIS_SYS = `You are a Tethr QA analyst.
 
 Given scripts plus a list of phrases, judge each phrase in order and return ONLY one valid JSON object:
-{"analysis":[{"phrase":"...","status":"relevant","scriptLetter":"a","why":"..."}]}
+{"analysis":[{"phrase":"...","status":"relevant"}]}
 
 Rules:
 - Return exactly one analysis item per input phrase, in the same order.
 - status must be exactly one of: "relevant", "nonrelevant", "pending".
-- scriptLetter is allowed ONLY when status is "relevant".
 - expectedStatus tells you the source label:
   - relevant: mark "relevant" only if a script clearly covers it at threshold, otherwise "pending"
   - pending: mark "relevant" if clearly covered, otherwise "pending"
   - nonrelevant: mark "nonrelevant" if the scripts should not fire; mark "pending" if a script might fire or you are unsure
-- Keep why very short, under 14 words.
 - No markdown, no explanations outside the JSON object.`;
 const parseLines = (t) => t.split("\n").map((l) => l.replace(/^[-•*\d.)]\s*/, "").trim()).filter(Boolean);
 const normalizePhrase = (t) => String(t || "").replace(/\s+/g, " ").trim();
@@ -3009,20 +3007,21 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
               </button>
             ))}
           </div>
+          <div style={{ padding:"8px 18px", borderBottom:"1px solid "+A.divider, fontSize:11, color:A.tertiary, background:A.fill }}>
+            Per-phrase reasoning is hidden here. The UI keeps the phrase set and the generated scripts only.
+          </div>
           <div style={{ maxHeight:480, overflowY:"auto" }}>
             {visibleAnalysis.map((item, i) => {
               const isR = item.status==="relevant", isP = item.status==="pending";
+              const statusLabel = isR ? "Relevant" : isP ? "Pending" : "Non-relevant";
+              const statusColor = isR ? A.greenDk : isP ? A.orange : A.redDk;
+              const statusBg = isR ? A.greenBg : isP ? A.orangeBg : A.redBg;
               return (
-                <div key={i} style={{ padding:"9px 18px", borderBottom:"1px solid "+A.divider, display:"flex", gap:10, alignItems:"flex-start", background:isP?A.orangeBg:A.white }}>
-                  {item.scriptLetter ? <ScriptBadge letter={item.scriptLetter} size={16} />
-                    : <span style={{ width:16, height:16, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}>
-                        <span style={{ width:7, height:7, borderRadius:"50%", background:!isR&&!isP?A.red:isP?A.orange:A.tertiary, display:"block" }} />
-                      </span>}
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <p style={{ fontSize:13, color:isR?A.text:isP?A.orange:A.tertiary, margin:0, lineHeight:1.4, fontStyle:!isR&&!isP?"italic":"normal" }}>{item.phrase}</p>
-                    {item.why && <p style={{ fontSize:11, color:A.tertiary, margin:"3px 0 0" }}>{item.why}</p>}
-                  </div>
-                  <span style={{ fontSize:16 }}>{isR?"👍":isP?"⏳":"👎"}</span>
+                <div key={i} style={{ padding:"10px 18px", borderBottom:"1px solid "+A.divider, display:"flex", gap:12, alignItems:"center", justifyContent:"space-between", background:isP?A.orangeBg:A.white }}>
+                  <p style={{ flex:1, minWidth:0, fontSize:13, color:isR?A.text:isP?A.orange:A.tertiary, margin:0, lineHeight:1.45, fontStyle:!isR&&!isP?"italic":"normal" }}>
+                    {item.phrase}
+                  </p>
+                  <Tag label={statusLabel} color={statusColor} bg={statusBg} />
                 </div>
               );
             })}
@@ -3713,8 +3712,6 @@ export default function App() {
       mergedAnalysis.push(...chunkAnalysis.map((item, index) => ({
         phrase: item.phrase || chunk[index].phrase,
         status: item.status || "pending",
-        scriptLetter: item.status === "relevant" ? item.scriptLetter : undefined,
-        why: item.why || "",
         _expectedStatus: chunk[index].expectedStatus,
       })));
     }
