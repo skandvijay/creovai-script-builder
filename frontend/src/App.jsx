@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // ─── APPLE DESIGN SYSTEM ─────────────────────────────────────────────────────
 const A = {
@@ -52,6 +52,12 @@ const MODEL_OPTIONS = {
     { value:"claude-3-5-haiku-20241022", label:"Claude 3.5 Haiku" },
   ],
 };
+const CSV_PREVIEW_PAGE_SIZE = 200;
+const ANALYSIS_PAGE_SIZE = 200;
+const LARGE_INPUT_PHRASE_THRESHOLD = 120;
+const LARGE_INPUT_CHAR_THRESHOLD = 18000;
+const ANALYSIS_CHUNK_SIZE = 80;
+const COMPARE_ANALYSIS_LIMIT = 250;
 
 function getBadgeColor(letter) {
   if (!letter) return BADGES[0];
@@ -2259,7 +2265,143 @@ REMINDERS:
 const DEFAULT_COMPARE_SYS = `You are a Tethr QA analyst. Compare AI vs human scripts, find gaps, return merged improvements.
 Return ONLY a valid JSON object. No text before or after. No markdown fences. No trailing commas:
 {"score":"8/10","summary":"...","coverage":{"both":[],"humanOnly":[],"aiOnly":[],"neither":[]},"missingPatterns":[],"actionItems":[],"improvedScripts":[{"letter":"a","lines":[],"covers":"...","threshold":".95"}]}`;
+const DEFAULT_BUILD_SCALABLE_SYS = `You are an expert Tethr speech analytics scripting engineer.
+
+Build Tethr detection scripts from large phrase sets. Optimise for stable, compact output.
+
+Return ONLY one valid JSON object with this exact shape:
+{"categoryName":"...","definition":"...","scripts":[{"letter":"a","lines":["line1"],"covers":"...","threshold":".95"}],"synonyms":{"word":["variant1","variant2"]}}
+
+Rules:
+- Do NOT return per-phrase analysis.
+- Do NOT return precision, recall, markdown, explanations, or extra keys.
+- Merge aggressively when phrases share the same intent structure.
+- Use [OR groups], (phrase groups), {optional bridge words}, and surgical :-1 guards when needed.
+- Use only words justified by the provided phrases and category definition.
+- Relevant and pending phrases should be catchable where appropriate.
+- Non-relevant phrases should be suppressed narrowly; avoid broad false-positive-prone anchors.
+- Keep the script set compact and production-oriented.`;
+const DEFAULT_ANALYSIS_SYS = `You are a Tethr QA analyst.
+
+Given scripts plus a list of phrases, judge each phrase in order and return ONLY one valid JSON object:
+{"analysis":[{"phrase":"...","status":"relevant","scriptLetter":"a","why":"..."}]}
+
+Rules:
+- Return exactly one analysis item per input phrase, in the same order.
+- status must be exactly one of: "relevant", "nonrelevant", "pending".
+- scriptLetter is allowed ONLY when status is "relevant".
+- expectedStatus tells you the source label:
+  - relevant: mark "relevant" only if a script clearly covers it at threshold, otherwise "pending"
+  - pending: mark "relevant" if clearly covered, otherwise "pending"
+  - nonrelevant: mark "nonrelevant" if the scripts should not fire; mark "pending" if a script might fire or you are unsure
+- Keep why very short, under 14 words.
+- No markdown, no explanations outside the JSON object.`;
 const parseLines = (t) => t.split("\n").map((l) => l.replace(/^[-•*\d.)]\s*/, "").trim()).filter(Boolean);
+const normalizePhrase = (t) => String(t || "").replace(/\s+/g, " ").trim();
+function dedupeBy(items, keyFn) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+const chunkArray = (arr, size) => {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+};
+const ratioString = (num, den) => den ? (num / den).toFixed(2) : "1.00";
+function buildScriptsText(scripts) {
+  return (scripts || []).map((s) => `Script ${s.letter}:\n${(s.lines || []).join("\n")}\nThreshold: ${s.threshold || ".95"}\nCovers: ${s.covers || ""}`).join("\n\n");
+}
+function getSaidByLabel(saidBy) {
+  return (saidBy || "any")==="internal"
+    ? "Internal (agent/rep only)"
+    : (saidBy || "any")==="external"
+    ? "External (customer only)"
+    : "Any (agent or customer)";
+}
+function buildParticipantGuidance(saidBy) {
+  if ((saidBy || "any") === "internal") {
+    return "Focus scripts on agent-led phrasing — first-person agent speech, offering/action intent, [I he she we (let me)] as subject layer.";
+  }
+  if ((saidBy || "any") === "external") {
+    return "Focus scripts on customer-led phrasing — requesting, questioning, expressing intent. Use [you your] as subject layer where relevant.";
+  }
+  return "Scripts should cover both agent and customer phrasing patterns.";
+}
+function collectPhraseInputs({ inputMode, relText, nonText, csvRows }) {
+  if (inputMode === "csv" && Array.isArray(csvRows)) {
+    const analysisItems = dedupeBy(
+      csvRows.map((row) => {
+        const phrase = normalizePhrase(row.phrase);
+        const status = row.status === "relevant"
+          ? "relevant"
+          : row.status === "nonrelevant" || row.status === "non-relevant"
+          ? "nonrelevant"
+          : "pending";
+        return { phrase, expectedStatus: status, notes: row.notes || "" };
+      }),
+      (item) => `${item.expectedStatus}::${item.phrase}`
+    );
+    const approved = dedupeBy(analysisItems.filter((item) => item.expectedStatus === "relevant"), (item) => item.phrase).map((item) => item.phrase);
+    const pending = dedupeBy(analysisItems.filter((item) => item.expectedStatus === "pending"), (item) => item.phrase).map((item) => item.phrase);
+    const nonRelevant = dedupeBy(analysisItems.filter((item) => item.expectedStatus === "nonrelevant"), (item) => item.phrase).map((item) => item.phrase);
+    return {
+      approved,
+      pending,
+      nonRelevant,
+      generationRelevant: dedupeBy([...approved, ...pending], (item) => item).map((item) => item),
+      analysisItems,
+    };
+  }
+
+  const approved = dedupeBy(parseLines(relText).map(normalizePhrase), (item) => item).map((item) => item);
+  const nonRelevant = dedupeBy(parseLines(nonText).map(normalizePhrase), (item) => item).map((item) => item);
+  return {
+    approved,
+    pending: [],
+    nonRelevant,
+    generationRelevant: approved,
+    analysisItems: [
+      ...approved.map((phrase) => ({ phrase, expectedStatus: "relevant" })),
+      ...nonRelevant.map((phrase) => ({ phrase, expectedStatus: "nonrelevant" })),
+    ],
+  };
+}
+function shouldUseScalableMode({ images, generationRelevant, nonRelevant, contextText, defText }) {
+  if (images.length) return false;
+  const phraseCount = generationRelevant.length + nonRelevant.length;
+  const chars = [...generationRelevant, ...nonRelevant].join("\n").length + String(contextText || "").length + String(defText || "").length;
+  return phraseCount >= LARGE_INPUT_PHRASE_THRESHOLD || chars >= LARGE_INPUT_CHAR_THRESHOLD;
+}
+function buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant, nonRelevant, pending }) {
+  let text = `Category definition: ${defText.trim() || "Not provided"}\n`;
+  text += `Said by: ${getSaidByLabel(saidBy)}\n`;
+  text += `${buildParticipantGuidance(saidBy)}\n`;
+  text += `Threshold: ${threshold}\n\n`;
+  if (contextText?.trim()) text += `Context examples:\n${contextText.trim()}\n\n`;
+  if (generationRelevant.length) text += `Relevant and pending phrases to cover:\n${generationRelevant.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
+  if (pending.length) text += `Pending subset inside the cover list:\n${pending.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
+  if (nonRelevant.length) text += `Non-relevant phrases to avoid:\n${nonRelevant.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
+  text += "Return a compact script set only. No phrase-by-phrase analysis.";
+  return text;
+}
+function buildAnalysisChunkText({ scripts, chunk, threshold }) {
+  return [
+    `Threshold: ${threshold}`,
+    "",
+    "Scripts:",
+    buildScriptsText(scripts),
+    "",
+    "Phrases to judge in order:",
+    ...chunk.map((item, index) => `${index + 1}. [${item.expectedStatus}] ${item.phrase}`),
+  ].join("\n");
+}
 
 const toB64 = (f) => new Promise((res, rej) => {
   const r = new FileReader();
@@ -2573,7 +2715,12 @@ const fieldStyle = { width:"100%", background:A.fill, border:"1px solid "+A.divi
 // ─── CREATE TAB ───────────────────────────────────────────────────────────────
 function CreateTab({ st, setSt, onGenerate }) {
   const csvRef = useRef();
+  const [csvPreviewLimit, setCsvPreviewLimit] = useState(CSV_PREVIEW_PAGE_SIZE);
   const set = (k, v) => setSt((p) => ({ ...p, [k]: v }));
+
+  useEffect(() => {
+    setCsvPreviewLimit(CSV_PREVIEW_PAGE_SIZE);
+  }, [st.csvRows?.length]);
 
   async function handleCSV(e) {
     const f = e.target.files[0]; if (!f) return;
@@ -2586,6 +2733,7 @@ function CreateTab({ st, setSt, onGenerate }) {
   const relC = st.csvRows ? st.csvRows.filter(isRel).length : 0;
   const nonC = st.csvRows ? st.csvRows.filter(isNon).length : 0;
   const penC = st.csvRows ? st.csvRows.filter((r) => !isRel(r) && !isNon(r)).length : 0;
+  const csvPreviewRows = st.csvRows ? st.csvRows.slice(0, csvPreviewLimit) : [];
 
   const MODES = [["text","Type phrases"],["image","Screenshots"],["csv","CSV / Excel"],["both","Mix"]];
 
@@ -2755,7 +2903,7 @@ function CreateTab({ st, setSt, onGenerate }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {st.csvRows.map((row, i) => {
+                    {csvPreviewRows.map((row, i) => {
                       const rel = isRel(row), non = isNon(row);
                       return (
                         <tr key={i} style={{ borderBottom:"1px solid "+A.divider }}>
@@ -2771,6 +2919,16 @@ function CreateTab({ st, setSt, onGenerate }) {
                   </tbody>
                 </table>
               </div>
+              {st.csvRows.length > csvPreviewRows.length && (
+                <div style={{ padding:"12px 18px", borderTop:"1px solid "+A.divider, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap" }}>
+                  <span style={{ fontSize:12, color:A.secondary }}>
+                    Showing {csvPreviewRows.length} of {st.csvRows.length} imported rows
+                  </span>
+                  <Btn small onClick={() => setCsvPreviewLimit((limit) => Math.min(limit + CSV_PREVIEW_PAGE_SIZE, st.csvRows.length))}>
+                    Show more
+                  </Btn>
+                </div>
+              )}
             </Card>
           )}
         </div>
@@ -2789,6 +2947,10 @@ function CreateTab({ st, setSt, onGenerate }) {
 // ─── VALIDATE TAB ─────────────────────────────────────────────────────────────
 function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
   const [filter, setFilter] = useState("all");
+  const [analysisLimit, setAnalysisLimit] = useState(ANALYSIS_PAGE_SIZE);
+  useEffect(() => {
+    setAnalysisLimit(ANALYSIS_PAGE_SIZE);
+  }, [filter, result]);
   if (loading) return <Spinner msg={msg} />;
   if (error) return <div style={{ paddingTop:28 }}><ErrBox msg={error} /></div>;
   if (!result) return (
@@ -2799,10 +2961,12 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
     </div>
   );
 
-  const rel = result.analysis.filter((a) => a.status==="relevant");
-  const non = result.analysis.filter((a) => a.status==="nonrelevant");
-  const pend = result.analysis.filter((a) => a.status==="pending");
-  const shown = filter==="all" ? result.analysis : result.analysis.filter((a) => a.status===filter);
+  const analysis = Array.isArray(result.analysis) ? result.analysis : [];
+  const rel = analysis.filter((a) => a.status==="relevant");
+  const non = analysis.filter((a) => a.status==="nonrelevant");
+  const pend = analysis.filter((a) => a.status==="pending");
+  const shown = filter==="all" ? analysis : analysis.filter((a) => a.status===filter);
+  const visibleAnalysis = shown.slice(0, analysisLimit);
   const pScore = parseFloat(result.precision||"1");
 
   return (
@@ -2830,7 +2994,7 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
         <Card>
           <div style={{ padding:"12px 18px", borderBottom:"1px solid "+A.divider, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
             <span style={{ fontWeight:600, fontSize:14, color:A.text }}>Phrases</span>
-            <span style={{ fontSize:12, color:A.secondary }}>{result.analysis.length} total</span>
+            <span style={{ fontSize:12, color:A.secondary }}>{analysis.length} total</span>
           </div>
           <div style={{ padding:"10px 14px", borderBottom:"1px solid "+A.divider, display:"flex", gap:6, flexWrap:"wrap" }}>
             {[
@@ -2846,7 +3010,7 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
             ))}
           </div>
           <div style={{ maxHeight:480, overflowY:"auto" }}>
-            {shown.map((item, i) => {
+            {visibleAnalysis.map((item, i) => {
               const isR = item.status==="relevant", isP = item.status==="pending";
               return (
                 <div key={i} style={{ padding:"9px 18px", borderBottom:"1px solid "+A.divider, display:"flex", gap:10, alignItems:"flex-start", background:isP?A.orangeBg:A.white }}>
@@ -2862,6 +3026,16 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
                 </div>
               );
             })}
+            {shown.length > visibleAnalysis.length && (
+              <div style={{ padding:"12px 18px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap", borderTop:"1px solid "+A.divider }}>
+                <span style={{ fontSize:12, color:A.secondary }}>
+                  Showing {visibleAnalysis.length} of {shown.length} phrases
+                </span>
+                <Btn small onClick={() => setAnalysisLimit((limit) => Math.min(limit + ANALYSIS_PAGE_SIZE, shown.length))}>
+                  Show more
+                </Btn>
+              </div>
+            )}
           </div>
         </Card>
 
@@ -2912,8 +3086,12 @@ function CompareTab({ aiResult, cst, setCst, comparePrompt, modelConfig }) {
       content.push({ type:"text", text:`Screenshot ${idx+1}: Extract all human-written scripts from the Scripts panel exactly — every letter (a, b, c...), every line of syntax. Also note any phrases visible: green thumbs-up = relevant, red thumbs-down = non-relevant (all red thumbs are non-relevant regardless of score), red thumbs-down with green precision score = false positive that additionally needs :-1 treatment.` });
     });
     const aiTxt = aiResult.scripts.map((s) => "Script "+s.letter+":\n"+s.lines.join("\n")).join("\n\n");
-    const phrases = aiResult.analysis.map((a) => "["+a.status+"] "+a.phrase).join("\n");
-    content.push({ type:"text", text:"AI scripts:\n"+aiTxt+"\n\nHuman scripts:\n"+(cst.humanTxt||"(see screenshots)")+"\n\nPhrases:\n"+phrases+"\n\nCompare, find gaps, return improved merged scripts." });
+    const phrasePreview = (aiResult.analysis || []).slice(0, COMPARE_ANALYSIS_LIMIT);
+    const phrases = phrasePreview.map((a) => "["+a.status+"] "+a.phrase).join("\n");
+    const phraseNote = (aiResult.analysis || []).length > phrasePreview.length
+      ? `\n\nOnly the first ${phrasePreview.length} analysed phrases are included here to keep comparison stable.`
+      : "";
+    content.push({ type:"text", text:"AI scripts:\n"+aiTxt+"\n\nHuman scripts:\n"+(cst.humanTxt||"(see screenshots)")+"\n\nPhrases:\n"+phrases+phraseNote+"\n\nCompare, find gaps, return improved merged scripts." });
     try { const r = await callAPI(comparePrompt, content, 3000, modelConfig); set("cmpResult", r); }
     catch(e) { set("cmpErr", e.message); }
     finally { set("cmpLoading", false); }
@@ -3504,16 +3682,82 @@ export default function App() {
   const [model, setModel] = useState(MODEL_OPTIONS.openai[0].value);
   const modelConfig = { provider, model };
 
+  async function runScalableBuild({ defText, contextText, saidBy, threshold, phraseData }) {
+    setLoadMsg(`Generating scalable script set for ${phraseData.generationRelevant.length + phraseData.nonRelevant.length} unique phrases…`);
+    const base = await callAPI(
+      DEFAULT_BUILD_SCALABLE_SYS,
+      [{ type:"text", text: buildScalableGenerationText({ defText, contextText, saidBy, threshold, generationRelevant: phraseData.generationRelevant, nonRelevant: phraseData.nonRelevant, pending: phraseData.pending }) }],
+      6000,
+      modelConfig
+    );
+
+    if (!Array.isArray(base.scripts) || !base.scripts.length) {
+      throw new Error("Scalable build did not return any scripts.");
+    }
+
+    const chunks = chunkArray(phraseData.analysisItems, ANALYSIS_CHUNK_SIZE);
+    const mergedAnalysis = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      setLoadMsg(`Analysing phrase batch ${i + 1} of ${chunks.length}…`);
+      const chunkResult = await callAPI(
+        DEFAULT_ANALYSIS_SYS,
+        [{ type:"text", text: buildAnalysisChunkText({ scripts: base.scripts, chunk, threshold }) }],
+        4000,
+        modelConfig
+      );
+      const chunkAnalysis = Array.isArray(chunkResult.analysis) ? chunkResult.analysis : [];
+      if (chunkAnalysis.length !== chunk.length) {
+        throw new Error(`Analysis batch ${i + 1} returned ${chunkAnalysis.length} rows for ${chunk.length} phrases.`);
+      }
+      mergedAnalysis.push(...chunkAnalysis.map((item, index) => ({
+        phrase: item.phrase || chunk[index].phrase,
+        status: item.status || "pending",
+        scriptLetter: item.status === "relevant" ? item.scriptLetter : undefined,
+        why: item.why || "",
+        _expectedStatus: chunk[index].expectedStatus,
+      })));
+    }
+
+    const approvedTotal = mergedAnalysis.filter((item) => item._expectedStatus === "relevant").length;
+    const nonRelevantTotal = mergedAnalysis.filter((item) => item._expectedStatus === "nonrelevant").length;
+    const approvedCovered = mergedAnalysis.filter((item) => item._expectedStatus === "relevant" && item.status === "relevant").length;
+    const nonRelevantRejected = mergedAnalysis.filter((item) => item._expectedStatus === "nonrelevant" && item.status === "nonrelevant").length;
+
+    return {
+      categoryName: base.categoryName || defText.trim() || "Category",
+      definition: base.definition || defText.trim() || "",
+      scripts: base.scripts || [],
+      synonyms: base.synonyms || {},
+      analysis: mergedAnalysis.map(({ _expectedStatus, ...item }) => item),
+      precision: ratioString(nonRelevantRejected, nonRelevantTotal),
+      recall: ratioString(approvedCovered, approvedTotal),
+    };
+  }
+
   async function generate() {
     setCst((p) => ({ ...p, buildErr:"" }));
     setBuildError("");
     const { inputMode, defText, contextText, saidBy, relText, nonText, images, csvRows, threshold } = cst;
-    const relLines = parseLines(relText), nonLines = parseLines(nonText);
+    const phraseData = collectPhraseInputs({ inputMode, relText, nonText, csvRows });
+    const relLines = phraseData.approved;
+    const nonLines = phraseData.nonRelevant;
     if (inputMode==="text" && !relLines.length) { setCst((p) => ({...p, buildErr:"Please add at least some relevant phrases."})); return; }
     if (inputMode==="image" && !images.length) { setCst((p) => ({...p, buildErr:"Please upload at least one screenshot."})); return; }
     if (inputMode==="csv" && !csvRows?.length) { setCst((p) => ({...p, buildErr:"Please upload a CSV file."})); return; }
     if (inputMode==="both" && !images.length && !relLines.length) { setCst((p) => ({...p, buildErr:"Please upload screenshots or add phrases — or both."})); return; }
     setLoading(true); setResult(null); setTab("validate");
+    if (shouldUseScalableMode({ images, generationRelevant: phraseData.generationRelevant, nonRelevant: phraseData.nonRelevant, contextText, defText })) {
+      try {
+        const scalableResult = await runScalableBuild({ defText, contextText, saidBy, threshold, phraseData });
+        setResult(scalableResult);
+      } catch (e) {
+        setBuildError(e.message);
+      } finally {
+        setLoading(false); setLoadMsg("");
+      }
+      return;
+    }
     const content = [];
     if (images.length) {
       setLoadMsg("Reading "+images.length+" screenshot"+(images.length>1?"s":"")+"…");
@@ -3540,17 +3784,12 @@ Also extract all scripts from the Scripts panel — every letter, every line of 
     setLoadMsg("Generating Tethr scripts…");
     let rPhrases = relLines, nPhrases = nonLines;
     if (inputMode==="csv" && csvRows) {
-      rPhrases = csvRows.filter((r) => r.status==="relevant").map((r) => r.phrase);
-      const pend = csvRows.filter((r) => r.status==="pending"||!r.status).map((r) => r.phrase);
-      nPhrases = csvRows.filter((r) => r.status==="nonrelevant"||r.status==="non-relevant").map((r) => r.phrase);
-      rPhrases = [...rPhrases, ...pend];
+      rPhrases = phraseData.generationRelevant;
+      nPhrases = phraseData.nonRelevant;
     }
     let ut = defText.trim() ? "Category definition: "+defText.trim()+"\n\n" : "";
-    const saidByLabel = (saidBy||"any")==="internal" ? "Internal (agent/rep only)" : (saidBy||"any")==="external" ? "External (customer only)" : "Any (agent or customer)";
-    ut += "Said by: "+saidByLabel+"\n";
-    ut += (saidBy||"any")==="internal" ? "Focus scripts on agent-led phrasing — first-person agent speech, offering/action intent, [I he she we (let me)] as subject layer.\n\n"
-        : (saidBy||"any")==="external" ? "Focus scripts on customer-led phrasing — requesting, questioning, expressing intent. Use [you your] as subject layer where relevant.\n\n"
-        : "Scripts should cover both agent and customer phrasing patterns.\n\n";
+    ut += "Said by: "+getSaidByLabel(saidBy)+"\n";
+    ut += buildParticipantGuidance(saidBy)+"\n\n";
     if (contextText?.trim()) ut += "Context examples (tone and domain only — not scored):\n"+contextText.trim()+"\n\n";
     if (rPhrases.length) ut += "Relevant phrases:\n"+rPhrases.map((p,i) => (i+1)+". "+p).join("\n")+"\n\n";
     if (nPhrases.length) ut += "Non-relevant phrases:\n"+nPhrases.map((p,i) => (i+1)+". "+p).join("\n")+"\n\n";
