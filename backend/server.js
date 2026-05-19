@@ -8,6 +8,23 @@ const cors = require("cors");
 
 const app = express();
 
+function extractOpenAIText(data) {
+  if (typeof data?.output_text === "string" && data.output_text.trim()) {
+    return data.output_text;
+  }
+
+  const parts = [];
+  for (const item of data?.output || []) {
+    for (const contentItem of item?.content || []) {
+      if (typeof contentItem?.text === "string" && contentItem.text) {
+        parts.push(contentItem.text);
+      }
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
 app.use(express.json({ limit: "10mb" }));
 
 const allowedOrigin = process.env.CORS_ORIGIN || "*";
@@ -85,7 +102,13 @@ app.post("/api/messages", async (req, res) => {
       if (!upstream.ok) {
         return res.status(upstream.status).json(data);
       }
-      return res.json({ outputText: data.output_text || "", provider: "openai", model: model || "gpt-4.1" });
+      const outputText = extractOpenAIText(data);
+      return res.json({
+        outputText,
+        provider: "openai",
+        model: model || "gpt-4.1",
+        rawResponse: outputText ? undefined : data,
+      });
     }
 
     if (provider === "claude") {

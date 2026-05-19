@@ -117,6 +117,10 @@ async function callAPI(system, content, maxTokens, modelConfig) {
   if (!res.ok) { const t = await res.text(); throw new Error("API " + res.status + ": " + t.slice(0, 200)); }
   const d = await res.json();
   const raw = d.outputText || "";
+  if (!raw.trim()) {
+    const detail = d.rawResponse ? JSON.stringify(d.rawResponse).slice(0, 400) : "No text content returned.";
+    throw new Error(`Model returned no text output. Provider: ${d.provider || modelConfig?.provider || "unknown"}, model: ${d.model || modelConfig?.model || "unknown"}. Detail: ${detail}`);
+  }
   try {
     return extractAndRepairJSON(raw);
   } catch (e) {

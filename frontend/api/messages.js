@@ -1,4 +1,21 @@
 export default async function handler(req, res) {
+  function extractOpenAIText(data) {
+    if (typeof data?.output_text === "string" && data.output_text.trim()) {
+      return data.output_text;
+    }
+
+    const parts = [];
+    for (const item of data?.output || []) {
+      for (const contentItem of item?.content || []) {
+        if (typeof contentItem?.text === "string" && contentItem.text) {
+          parts.push(contentItem.text);
+        }
+      }
+    }
+
+    return parts.join("\n").trim();
+  }
+
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
     return res.status(405).json({ error: "Method Not Allowed" });
@@ -68,7 +85,13 @@ export default async function handler(req, res) {
       if (!upstream.ok) {
         return res.status(upstream.status).json(data);
       }
-      return res.status(200).json({ outputText: data.output_text || "", provider: "openai", model: model || "gpt-4.1" });
+      const outputText = extractOpenAIText(data);
+      return res.status(200).json({
+        outputText,
+        provider: "openai",
+        model: model || "gpt-4.1",
+        rawResponse: outputText ? undefined : data,
+      });
     }
 
     if (provider === "claude") {
