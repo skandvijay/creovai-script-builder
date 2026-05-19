@@ -102,7 +102,7 @@ function extractAndRepairJSON(raw) {
   return JSON.parse(s);
 }
 
-async function callAPI(system, content, maxTokens, modelConfig) {
+async function requestAPI(system, content, maxTokens, modelConfig) {
   const res = await fetch("/api/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -115,7 +115,11 @@ async function callAPI(system, content, maxTokens, modelConfig) {
     }),
   });
   if (!res.ok) { const t = await res.text(); throw new Error("API " + res.status + ": " + t.slice(0, 200)); }
-  const d = await res.json();
+  return res.json();
+}
+
+async function callAPI(system, content, maxTokens, modelConfig) {
+  const d = await requestAPI(system, content, maxTokens, modelConfig);
   const raw = d.outputText || "";
   if (!raw.trim()) {
     const detail = d.rawResponse ? JSON.stringify(d.rawResponse).slice(0, 400) : "No text content returned.";
@@ -124,6 +128,28 @@ async function callAPI(system, content, maxTokens, modelConfig) {
   try {
     return extractAndRepairJSON(raw);
   } catch (e) {
+    const canRetryLarger =
+      (modelConfig?.provider || "openai") === "openai" &&
+      maxTokens < 16000 &&
+      (
+        d?.status === "incomplete" ||
+        d?.incompleteDetails?.reason === "max_output_tokens" ||
+        /Expected ',' or '\]'|Unmatched braces|Unexpected end of JSON input/.test(e.message)
+      );
+
+    if (canRetryLarger) {
+      const retried = await requestAPI(system, content, Math.min(maxTokens * 2, 16000), modelConfig);
+      const retryRaw = retried.outputText || "";
+      if (!retryRaw.trim()) {
+        const retryDetail = retried.rawResponse ? JSON.stringify(retried.rawResponse).slice(0, 400) : "No text content returned.";
+        throw new Error(`Model returned no text output after retry. Provider: ${retried.provider || modelConfig?.provider || "unknown"}, model: ${retried.model || modelConfig?.model || "unknown"}. Detail: ${retryDetail}`);
+      }
+      try {
+        return extractAndRepairJSON(retryRaw);
+      } catch (retryError) {
+        throw new Error("JSON parse error after large-output retry — " + retryError.message + ". Raw (first 200 chars): " + retryRaw.slice(0, 200));
+      }
+    }
     throw new Error("JSON parse error — " + e.message + ". Raw (first 200 chars): " + raw.slice(0, 200));
   }
 }

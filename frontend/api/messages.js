@@ -59,6 +59,11 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           model: model || "gpt-4.1",
           instructions: system,
+          text: {
+            format: {
+              type: "json_object",
+            },
+          },
           input: [
             {
               role: "user",
@@ -90,6 +95,8 @@ export default async function handler(req, res) {
         outputText,
         provider: "openai",
         model: model || "gpt-4.1",
+        status: data.status,
+        incompleteDetails: data.incomplete_details,
         rawResponse: outputText ? undefined : data,
       });
     }
