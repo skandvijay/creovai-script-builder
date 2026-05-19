@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  chunkArray,
   collectPhraseInputs,
   parseCSV,
   ratioString,
 } from "./lib/inputProcessing.js";
 import { formatClusterSummary } from "./lib/clusterPhrases.js";
+import { assignPhrasesToScripts } from "./lib/scriptMatcher.js";
 import {
   sanitizeBuildResult,
   sanitizeCompareResult,
@@ -68,7 +68,6 @@ const CSV_PREVIEW_PAGE_SIZE = 200;
 const ANALYSIS_PAGE_SIZE = 200;
 const LARGE_INPUT_PHRASE_THRESHOLD = 120;
 const LARGE_INPUT_CHAR_THRESHOLD = 18000;
-const ANALYSIS_CHUNK_SIZE = 80;
 const COMPARE_ANALYSIS_LIMIT = 250;
 
 function getBadgeColor(letter) {
@@ -2287,22 +2286,6 @@ LARGE INPUT EXECUTION NOTE:
   {"categoryName":"...","definition":"...","scripts":[{"letter":"a","lines":["line1"],"covers":"...","threshold":".95"}],"synonyms":{"word":["variant1","variant2"]}}
 - Do not include analysis, precision, or recall in this step; those are handled separately after script generation.
 - Return valid JSON only.`;
-const DEFAULT_ANALYSIS_SYS = `You are a Tethr QA analyst.
-
-Given scripts plus a list of phrases, judge each phrase in order and return ONLY one valid JSON object:
-{"analysis":[{"phrase":"...","status":"relevant"}]}
-
-Rules:
-- Return exactly one analysis item per input phrase, in the same order.
-- status must be exactly one of: "relevant", "nonrelevant", "pending".
-- expectedStatus tells you the source label:
-  - relevant: mark "relevant" only if a script clearly covers it at threshold, otherwise "pending"
-  - pending: mark "relevant" if clearly covered, otherwise "pending"
-  - nonrelevant: mark "nonrelevant" if the scripts should not fire; mark "pending" if a script might fire or you are unsure
-- No markdown, no explanations outside the JSON object.`;
-function buildScriptsText(scripts) {
-  return (scripts || []).map((s) => `Script ${s.letter}:\n${(s.lines || []).join("\n")}\nThreshold: ${s.threshold || ".95"}\nCovers: ${s.covers || ""}`).join("\n\n");
-}
 function getSaidByLabel(saidBy) {
   return (saidBy || "any")==="internal"
     ? "Internal (agent/rep only)"
@@ -2337,17 +2320,6 @@ function buildScalableGenerationText({ defText, contextText, saidBy, threshold, 
   if (nonRelevant.length) text += `Non-relevant phrases to avoid:\n${nonRelevant.map((phrase, index) => `${index + 1}. ${phrase}`).join("\n")}\n\n`;
   text += "Return a compact script set only. No phrase-by-phrase analysis.";
   return text;
-}
-function buildAnalysisChunkText({ scripts, chunk, threshold }) {
-  return [
-    `Threshold: ${threshold}`,
-    "",
-    "Scripts:",
-    buildScriptsText(scripts),
-    "",
-    "Phrases to judge in order:",
-    ...chunk.map((item, index) => `${index + 1}. [${item.expectedStatus}] ${item.phrase}`),
-  ].join("\n");
 }
 
 const toB64 = (f) => new Promise((res, rej) => {
@@ -2924,7 +2896,7 @@ function ValidateTab({ result, loading, msg, error, onEdit, onCompare }) {
       {warnings.length > 0 && (
         <Card style={{ marginBottom:16 }} padding="12px 18px">
           <p style={{ fontSize:12, fontWeight:700, color:A.orange, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:8 }}>
-            Script repairs applied
+            Build notes
           </p>
           {warnings.map((warning, index) => (
             <p key={index} style={{ fontSize:12, color:A.secondary, margin:"0 0 4px", lineHeight:1.5 }}>
@@ -3641,32 +3613,20 @@ export default function App() {
       throw new Error("Scalable build did not return any scripts.");
     }
 
-    const chunks = chunkArray(phraseData.analysisItems, ANALYSIS_CHUNK_SIZE);
-    const mergedAnalysis = [];
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      setLoadMsg(`Analysing phrase batch ${i + 1} of ${chunks.length}…`);
-      const chunkResult = await callAPI(
-        DEFAULT_ANALYSIS_SYS,
-        [{ type:"text", text: buildAnalysisChunkText({ scripts: base.scripts, chunk, threshold }) }],
-        4000,
-        modelConfig
-      );
-      const chunkAnalysis = Array.isArray(chunkResult.analysis) ? chunkResult.analysis : [];
-      if (chunkAnalysis.length !== chunk.length) {
-        throw new Error(`Analysis batch ${i + 1} returned ${chunkAnalysis.length} rows for ${chunk.length} phrases.`);
-      }
-      mergedAnalysis.push(...chunkAnalysis.map((item, index) => ({
-        phrase: item.phrase || chunk[index].phrase,
-        status: item.status || "pending",
-        _expectedStatus: chunk[index].expectedStatus,
-      })));
-    }
+    setLoadMsg(`Scoring ${phraseData.analysisItems.length} phrases against the generated scripts…`);
+    const mergedAnalysis = assignPhrasesToScripts(phraseData.analysisItems, base.scripts, threshold).map((item, index) => ({
+      ...item,
+      _expectedStatus: phraseData.analysisItems[index]?.expectedStatus,
+    }));
 
     const approvedTotal = mergedAnalysis.filter((item) => item._expectedStatus === "relevant").length;
     const nonRelevantTotal = mergedAnalysis.filter((item) => item._expectedStatus === "nonrelevant").length;
     const approvedCovered = mergedAnalysis.filter((item) => item._expectedStatus === "relevant" && item.status === "relevant").length;
     const nonRelevantRejected = mergedAnalysis.filter((item) => item._expectedStatus === "nonrelevant" && item.status === "nonrelevant").length;
+    const pendingCount = mergedAnalysis.filter((item) => item.status === "pending").length;
+    const localWarnings = pendingCount > 0
+      ? [`Deterministic phrase-to-script scoring left ${pendingCount} phrase${pendingCount === 1 ? "" : "s"} pending for manual review.`]
+      : [];
 
       return {
         categoryName: base.categoryName || defText.trim() || "Category",
@@ -3676,7 +3636,7 @@ export default function App() {
         analysis: mergedAnalysis.map(({ _expectedStatus, ...item }) => item),
         precision: ratioString(nonRelevantRejected, nonRelevantTotal),
         recall: ratioString(approvedCovered, approvedTotal),
-        warnings: [...(Array.isArray(base.warnings) ? base.warnings : [])],
+        warnings: [...(Array.isArray(base.warnings) ? base.warnings : []), ...localWarnings],
       };
   }
 
